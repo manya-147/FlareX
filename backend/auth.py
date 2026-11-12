@@ -11,7 +11,7 @@ from pwdlib import PasswordHash
 from sqlalchemy import Column, DateTime, Integer, String
 from sqlalchemy.orm import Session
 
-from .database import Base, get_db
+from database import Base, get_db
 
 
 # Configuration
