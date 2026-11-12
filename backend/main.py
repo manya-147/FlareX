@@ -24,13 +24,15 @@ Base.metadata.create_all(bind=engine)
 
 # Register authentication routes
 app.include_router(auth_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:5174",
-        "http://127.0.0.1:5174"
+        "http://127.0.0.1:5174",
+        "https://flarex-lime.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
