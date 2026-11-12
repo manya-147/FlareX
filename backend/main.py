@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+from functools import lru_cache
 import pandas as pd
 from .auth import router as auth_router, User
 from .database import Base, engine
@@ -214,7 +215,9 @@ SEVERITY_ORDER = {
 # 7. ALERT GENERATION AND FILTERING
 # ==================================================
 
+
 @app.get("/api/alerts")
+@lru_cache(maxsize=128)
 def get_alerts(
     limit: int = Query(default=10, ge=1, le=50),
     severity: str = Query(default="All"),

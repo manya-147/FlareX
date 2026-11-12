@@ -15,7 +15,8 @@ import {
 } from 'lucide-react';
 import './Alerts.css';
 
-const API_URL = 'http://127.0.0.1:8000/api/alerts';
+import { API_BASE_URL } from "./api";
+const API_URL = `${API_BASE_URL}/api/alerts`;
 
 function Alerts() {
   const [data, setData] = useState(null);

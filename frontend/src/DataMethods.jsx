@@ -31,7 +31,8 @@ import {
 
 import './DataMethods.css';
 
-const API_URL = 'http://127.0.0.1:8000/api/analytics/charts';
+import { API_BASE_URL } from "./api";
+const API_URL = `${API_BASE_URL}/api/analytics/charts`;
 
 const COLORS = ['#ff795f', '#62d9bd', '#f4bd65'];
 

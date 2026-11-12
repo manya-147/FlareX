@@ -35,7 +35,8 @@ import { states, stateList, loadDistricts } from 'vardhan-maps/data';
 import 'leaflet/dist/leaflet.css';
 import './ExploreMap.css';
 
-const API_URL = 'http://127.0.0.1:8000/api/detections';
+import { API_BASE_URL } from "./api";
+const API_URL = `${API_BASE_URL}/api/detections`;
 
 const COLORS = {
   h: '#ff5548',
@@ -694,6 +695,7 @@ const visible = useMemo(() => {
               scrollWheelZoom
               worldCopyJump
               zoomControl={false}
+              preferCanvas
             >
               <MapFocusController
                   selected={selected}

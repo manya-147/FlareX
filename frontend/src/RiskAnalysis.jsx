@@ -12,7 +12,8 @@ import {
 } from 'lucide-react';
 import './RiskAnalysis.css';
 
-const API_URL = 'http://127.0.0.1:8000/api/analytics/overview';
+import { API_BASE_URL } from "./api";
+const API_URL = `${API_BASE_URL}/api/analytics/overview`;
 
 function MetricCard({ icon: Icon, label, value, unit, description }) {
   return (
