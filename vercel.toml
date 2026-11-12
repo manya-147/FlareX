@@ -13,4 +13,3 @@ destination = { service = "api" }
 [[rewrites]]
 source = "/(.*)"
 destination = { service = "web" }
-
