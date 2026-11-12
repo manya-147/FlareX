@@ -52,7 +52,7 @@ The dataset contains the following information:
 - Median Fire Radiative Power: 2.15 MW
 - Maximum Fire Radiative Power: 93.62 MW
 
-## ⚙️ Current Implementation
+##  Current Implementation
 
 ### 1. Data Processing and Preprocessing
 - Loading and processing NASA FIRMS CSV data.
@@ -151,14 +151,6 @@ FlareX/
 
 ##  Future Roadmap
 
-- [x] NASA FIRMS dataset integration.
-- [x] Initial dataset exploration.
-- [x] Data preprocessing and validation.
-- [x] FastAPI backend development.
-- [x] Analytics and chart endpoints.
-- [x] Geospatial clustering using DBSCAN.
-- [x] Initial fire activity alert generation.
-- [x] Authentication integration.
 - [ ] Further dataset auditing and feature engineering.
 - [ ] Exploratory analysis for predictive modelling.
 - [ ] Fire occurrence prediction model.
