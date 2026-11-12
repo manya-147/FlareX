@@ -4,7 +4,7 @@ import numpy as np
 from functools import lru_cache
 import pandas as pd
 from auth import router as auth_router, User
-from .database import Base, engine
+from database import Base, engine
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.cluster import DBSCAN
