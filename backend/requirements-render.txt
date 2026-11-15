@@ -1,9 +1,9 @@
 fastapi
 uvicorn[standard]
-requests
 numpy
 pandas
 scikit-learn
 SQLAlchemy
 PyJWT
 pwdlib[argon2]
+requests
