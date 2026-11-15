@@ -11,8 +11,10 @@ from pwdlib import PasswordHash
 from sqlalchemy import Column, DateTime, Integer, String
 from sqlalchemy.orm import Session
 
-from database import Base, get_db
-
+try:
+    from .database import Base, get_db
+except ImportError:
+    from database import Base, get_db
 
 # Configuration
 SECRET_KEY = os.getenv(

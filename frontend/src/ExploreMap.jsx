@@ -1,4 +1,3 @@
-
 import { useEffect, useMemo, useState } from 'react';
 import L from 'leaflet';
 import {
@@ -35,8 +34,9 @@ import { states, stateList, loadDistricts } from 'vardhan-maps/data';
 import 'leaflet/dist/leaflet.css';
 import './ExploreMap.css';
 
-import { API_BASE_URL } from "./api";
-const API_URL = `${API_BASE_URL}/api/detections`;
+import { API_BASE_URL } from './api';
+
+const LIVE_API_URL = `${API_BASE_URL}/api/live-observations`;
 
 const COLORS = {
   h: '#ff5548',
@@ -49,14 +49,6 @@ const confidenceLabel = (value) => ({
   n: 'Nominal',
   l: 'Low'
 }[value] || 'Unknown');
-
-function intensityRange(value) {
-  if (value === 'Low') return [0, 5];
-  if (value === 'Medium') return [5, 20];
-  if (value === 'High') return [20, 10000];
-  return [0, 10000];
-}
-
 
 function MapFocusController({ selected, feature }) {
   const map = useMap();
@@ -93,20 +85,30 @@ function MapFocusController({ selected, feature }) {
   return null;
 }
 
-
 function detectionInsideFeature(detection, feature) {
   if (!feature?.geometry) return false;
 
   const latitude = Number(detection.latitude);
   const longitude = Number(detection.longitude);
 
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return false;
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return false;
+  }
 
   try {
-    return booleanPointInPolygon(point([longitude, latitude]), feature);
+    return booleanPointInPolygon(
+      point([longitude, latitude]),
+      feature
+    );
   } catch {
     return false;
   }
+}
+
+function isInsideIndia(detection) {
+  return states.features.some(feature =>
+    detectionInsideFeature(detection, feature)
+  );
 }
 
 export default function ExploreMap({
@@ -117,17 +119,26 @@ export default function ExploreMap({
   selectedDistrict: sharedDistrict,
   onDistrictChange
 }) {
-  const [detections, setDetections] = useState([]);
-  const [selected, setSelected] = useState(null);
+  const [liveDetections, setLiveDetections] = useState([]);
+  const [liveLoading, setLiveLoading] = useState(true);
+  const [liveError, setLiveError] = useState('');
 
+  const [selected, setSelected] = useState(null);
   const [confidence, setConfidence] = useState('All');
   const [intensity, setIntensity] = useState('All');
   const [date, setDate] = useState('');
+
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [localSearch, setLocalSearch] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [localState, setLocalState] = useState('');
   const [localDistrict, setLocalDistrict] = useState('');
+
+  const [districts, setDistricts] = useState([]);
+  const [districtLoading, setDistrictLoading] = useState(false);
+  const [geoError, setGeoError] = useState('');
+
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const search = sharedSearch ?? localSearch;
   const setSearch = onSearchChange ?? setLocalSearch;
@@ -137,69 +148,97 @@ export default function ExploreMap({
 
   const selectedDistrict = sharedDistrict ?? localDistrict;
   const setSelectedDistrict = onDistrictChange ?? setLocalDistrict;
-  const [districts, setDistricts] = useState([]);
-  const [districtLoading, setDistrictLoading] = useState(false);
-  const [geoError, setGeoError] = useState('');
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [refreshKey, setRefreshKey] = useState(0);
-
+  // Fetch live or historical NASA FIRMS observations.
+  // Live mode refreshes every 15 minutes.
+  // Historical mode fetches the exact selected acquisition date.
   useEffect(() => {
     const controller = new AbortController();
+    let isMounted = true;
 
     async function fetchDetections() {
-      setLoading(true);
-      setError('');
+      setLiveLoading(true);
+      setLiveError('');
+      setSelected(null);
+
+      const isHistorical = Boolean(date);
+
+      const url = isHistorical
+        ? `${API_BASE_URL}/api/historical-observations?date=${encodeURIComponent(date)}`
+        : `${LIVE_API_URL}?day_range=1`;
 
       try {
-        const params = new URLSearchParams({
-          limit: '10000',
-          confidence,
-          date
+        const response = await fetch(url, {
+          signal: controller.signal
         });
-
-        const [minFrp, maxFrp] = intensityRange(intensity);
-
-        params.set('min_frp', String(minFrp));
-        params.set('max_frp', String(maxFrp));
-
-        const response = await fetch(
-          `${API_URL}?${params.toString()}`,
-          { signal: controller.signal }
-        );
-
-        if (!response.ok) {
-          throw new Error(`Server responded with ${response.status}`);
-        }
 
         const result = await response.json();
 
-        if (!Array.isArray(result.detections)) {
-          throw new Error('Invalid detections response from API.');
+        if (!response.ok) {
+          throw new Error(
+            result.detail || `NASA FIRMS API responded with ${response.status}`
+          );
         }
 
-        setDetections(result.detections);
-        setSelected(null);
+        if (!Array.isArray(result.observations)) {
+          throw new Error('Invalid NASA FIRMS observations response.');
+        }
+
+        if (!isMounted) return;
+
+        setLiveDetections(
+          result.observations.map((item, index) => ({
+            ...item,
+            id: `${isHistorical ? 'historical' : 'live'}-${item.latitude}-${item.longitude}-${item.acq_date}-${item.acq_time}-${index}`,
+            date: item.acq_date,
+            time: String(item.acq_time ?? '').padStart(4, '0'),
+            satellite: item.satellite,
+            instrument: item.instrument,
+            confidence: String(item.confidence || '').toLowerCase(),
+            source: isHistorical
+              ? 'NASA FIRMS HISTORICAL'
+              : 'NASA FIRMS LIVE'
+          }))
+        );
 
       } catch (err) {
-        if (err.name !== 'AbortError') {
-          setError(err.message || 'Unable to load observations.');
-          setDetections([]);
-          setSelected(null);
+        if (err.name !== 'AbortError' && isMounted) {
+          setLiveError(
+            err.message || 'Unable to load NASA FIRMS observations.'
+          );
+          setLiveDetections([]);
         }
       } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
+        if (isMounted && !controller.signal.aborted) {
+          setLiveLoading(false);
         }
       }
     }
 
     fetchDetections();
 
-    return () => controller.abort();
-  }, [confidence, intensity, date, refreshKey]);
+    // Only live observations refresh automatically.
+    if (date) {
+      return () => {
+        isMounted = false;
+        controller.abort();
+      };
+    }
 
+    const refreshInterval = setInterval(
+      fetchDetections,
+      15 * 60 * 1000
+    );
+
+    return () => {
+      isMounted = false;
+      controller.abort();
+      clearInterval(refreshInterval);
+    };
+
+  }, [refreshKey, date]);
+
+  // Load district boundaries when a state is selected.
   useEffect(() => {
     let cancelled = false;
 
@@ -207,26 +246,39 @@ export default function ExploreMap({
     setDistricts([]);
     setGeoError('');
 
-    if (!selectedState) return undefined;
+    if (!selectedState) {
+      setDistrictLoading(false);
+      return undefined;
+    }
 
     async function fetchDistricts() {
       setDistrictLoading(true);
+
       try {
         const result = await loadDistricts(selectedState);
-        if (!cancelled) setDistricts(result);
+
+        if (!cancelled) {
+          setDistricts(result);
+        }
       } catch (err) {
         if (!cancelled) {
-          setGeoError(err.message || 'Could not load district boundaries.');
+          setGeoError(
+            err.message || 'Could not load district boundaries.'
+          );
         }
       } finally {
-        if (!cancelled) setDistrictLoading(false);
+        if (!cancelled) {
+          setDistrictLoading(false);
+        }
       }
     }
 
     fetchDistricts();
+
     return () => {
       cancelled = true;
     };
+
   }, [selectedState]);
 
   const selectedStateFeature = useMemo(
@@ -243,65 +295,122 @@ export default function ExploreMap({
     [districts, selectedDistrict]
   );
 
+  // First restrict observations to India and selected geography.
   const geographicallyFiltered = useMemo(() => {
-    if (!selectedStateFeature && !selectedDistrictFeature) return detections;
+    return liveDetections.filter(detection => {
+      if (!isInsideIndia(detection)) return false;
 
-    return detections.filter(detection => {
       if (
         selectedStateFeature &&
         !detectionInsideFeature(detection, selectedStateFeature)
-      ) return false;
+      ) {
+        return false;
+      }
 
       if (
         selectedDistrictFeature &&
         !detectionInsideFeature(detection, selectedDistrictFeature)
-      ) return false;
+      ) {
+        return false;
+      }
 
       return true;
     });
-  }, [detections, selectedStateFeature, selectedDistrictFeature]);
+  }, [
+    liveDetections,
+    selectedStateFeature,
+    selectedDistrictFeature
+  ]);
 
-  
-const visible = useMemo(() => {
-  const query = search.trim().toLowerCase();
+  // Apply date, confidence and FRP filters.
+  const filteredDetections = useMemo(() => {
+    return geographicallyFiltered.filter(item => {
+      if (date && item.date !== date) {
+        return false;
+      }
 
-  if (!query) return geographicallyFiltered;
+      if (confidence !== 'All') {
+        const expectedConfidence = {
+          High: 'h',
+          Nominal: 'n',
+          Low: 'l'
+        }[confidence];
 
-  // Search by Indian state name
-  const matchedState = stateList.find(
-    state => state.name.toLowerCase() === query
-  );
+        if (item.confidence !== expectedConfidence) {
+          return false;
+        }
+      }
 
-  if (matchedState) {
-    const stateFeature = states.features.find(
-      feature =>
-        feature.properties?.name?.toLowerCase() ===
-        matchedState.name.toLowerCase()
+      const frp = Number(item.frp);
+
+      if (intensity !== 'All') {
+        if (!Number.isFinite(frp)) return false;
+
+        if (intensity === 'Low' && !(frp >= 0 && frp < 5)) {
+          return false;
+        }
+
+        if (intensity === 'Medium' && !(frp >= 5 && frp < 20)) {
+          return false;
+        }
+
+        if (intensity === 'High' && !(frp >= 20)) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [
+    geographicallyFiltered,
+    date,
+    confidence,
+    intensity
+  ]);
+
+  // Search within the filtered NASA FIRMS observations.
+  const visible = useMemo(() => {
+    const query = search.trim().toLowerCase();
+
+    if (!query) return filteredDetections;
+
+    const matchedState = stateList.find(
+      state => state.name.toLowerCase() === query
     );
 
-    if (stateFeature) {
-      return geographicallyFiltered.filter(
-        detection => detectionInsideFeature(detection, stateFeature)
+    if (matchedState) {
+      const stateFeature = states.features.find(
+        feature =>
+          feature.properties?.name?.toLowerCase() ===
+          matchedState.name.toLowerCase()
       );
+
+      if (stateFeature) {
+        return filteredDetections.filter(
+          detection =>
+            detectionInsideFeature(detection, stateFeature)
+        );
+      }
     }
-  }
 
-  // Otherwise search observation details
-  return geographicallyFiltered.filter(item => {
-    const values = [
-      item.latitude,
-      item.longitude,
-      item.date,
-      item.time,
-      item.satellite,
-      item.instrument,
-      item.frp,
-      confidenceLabel(item.confidence)
-    ];
+    return filteredDetections.filter(item => {
+      const values = [
+        item.latitude,
+        item.longitude,
+        item.date,
+        item.time,
+        item.satellite,
+        item.instrument,
+        item.frp,
+        confidenceLabel(item.confidence)
+      ];
 
-    return values.join(' ').toLowerCase().includes(query);
-  });
-}, [geographicallyFiltered, search]);
+      return values
+        .join(' ')
+        .toLowerCase()
+        .includes(query);
+    });
+  }, [filteredDetections, search]);
 
   const searchResults = useMemo(
     () => search.trim().length >= 2 ? visible.slice(0, 8) : [],
@@ -366,10 +475,14 @@ const visible = useMemo(() => {
         <div className="fx-header-actions">
           <div className="fx-source-status">
             <span className="fx-live-dot" />
-            NASA FIRMS DATA
+            {date ? `HISTORICAL DATA · ${date}` : "NASA FIRMS LIVE DATA"}
           </div>
 
-          <button className="fx-refresh" onClick={refreshData}>
+          <button
+            className="fx-refresh"
+            onClick={refreshData}
+            disabled={liveLoading}
+          >
             <RefreshCw size={15} />
             Refresh data
           </button>
@@ -377,95 +490,92 @@ const visible = useMemo(() => {
       </header>
 
       {/* SEARCH */}
-      
-{/* SEARCH */}
-<div className="fx-search-row">
-  <div className="fx-search">
-    <Search size={17} />
+      <div className="fx-search-row">
+        <div className="fx-search">
+          <Search size={17} />
 
-    <input
-      type="text"
-      value={search}
-      onChange={e => setSearch(e.target.value)}
-      onFocus={() => setSearchOpen(true)}
-      onKeyDown={e => {
-        if (e.key === 'Escape') setSearchOpen(false);
-      }}
-      placeholder="Search coordinates, satellite, date, FRP..."
-    />
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            onFocus={() => setSearchOpen(true)}
+            onKeyDown={e => {
+              if (e.key === 'Escape') setSearchOpen(false);
+            }}
+            placeholder="Search coordinates, satellite, date, FRP..."
+          />
 
-    {search && (
-      <button
-        onClick={() => setSearch('')}
-        aria-label="Clear search"
-      >
-        <X size={15} />
-      </button>
-    )}
-  </div>
-
-  <div className="fx-search-hint">
-    <Crosshair size={14} />
-    Search loaded observations
-  </div>
-
-  {searchOpen && search.trim().length >= 2 && (
-    <div className="fx-search-results">
-      <div className="fx-search-results-heading">
-        <span>OBSERVATIONS</span>
-        <strong>{visible.length} matches</strong>
-      </div>
-
-      {searchResults.length > 0 ? (
-        <div className="fx-search-results-list">
-          {searchResults.map((item, index) => (
+          {search && (
             <button
-              className="fx-search-result"
-              key={item.id ?? `${item.latitude}-${item.longitude}-${index}`}
-              onClick={() => {
-                selectDetection(item);
-                setSearchOpen(false);
-              }}
+              onClick={() => setSearch('')}
+              aria-label="Clear search"
             >
-              <span className="fx-result-marker">
-                <Flame size={16} />
-              </span>
-
-              <span className="fx-result-main">
-                <strong>
-                  {item.satellite || 'Satellite observation'} · {item.frp} MW
-                </strong>
-
-                <small>
-                  {item.latitude}, {item.longitude}
-                </small>
-
-                <small>
-                  {item.date} · {item.time || ''} UTC
-                </small>
-              </span>
-
-              <span className="fx-result-confidence">
-                {confidenceLabel(item.confidence)}
-              </span>
+              <X size={15} />
             </button>
-          ))}
+          )}
         </div>
-      ) : (
-        <p className="fx-search-no-results">
-          No matching observations found.
-        </p>
-      )}
 
-      {visible.length > searchResults.length && (
-        <p className="fx-search-more">
-          Showing the first {searchResults.length} matches.
-        </p>
-      )}
-    </div>
-  )}
-</div>
+        <div className="fx-search-hint">
+          <Crosshair size={14} />
+          Search loaded observations
+        </div>
 
+        {searchOpen && search.trim().length >= 2 && (
+          <div className="fx-search-results">
+            <div className="fx-search-results-heading">
+              <span>OBSERVATIONS</span>
+              <strong>{visible.length} matches</strong>
+            </div>
+
+            {searchResults.length > 0 ? (
+              <div className="fx-search-results-list">
+                {searchResults.map((item, index) => (
+                  <button
+                    className="fx-search-result"
+                    key={item.id ?? `${item.latitude}-${item.longitude}-${index}`}
+                    onClick={() => {
+                      selectDetection(item);
+                      setSearchOpen(false);
+                    }}
+                  >
+                    <span className="fx-result-marker">
+                      <Flame size={16} />
+                    </span>
+
+                    <span className="fx-result-main">
+                      <strong>
+                        {item.satellite || 'Satellite observation'} · {item.frp} MW
+                      </strong>
+
+                      <small>
+                        {item.latitude}, {item.longitude}
+                      </small>
+
+                      <small>
+                        {item.date} · {item.time || ''} UTC
+                      </small>
+                    </span>
+
+                    <span className="fx-result-confidence">
+                      {confidenceLabel(item.confidence)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="fx-search-no-results">
+                No matching observations found.
+              </p>
+            )}
+
+            {visible.length > searchResults.length && (
+              <p className="fx-search-more">
+                Showing the first {searchResults.length} matches.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* STATISTICS */}
       <section className="fx-stats">
@@ -508,12 +618,21 @@ const visible = useMemo(() => {
 
         <div className="fx-stats-status">
           <span className="fx-live-dot" />
-          {loading ? 'Updating data' : 'Dataset loaded'}
+
+          {liveLoading
+            ? (date
+                ? "Loading historical observations"
+                : "Updating live observations")
+            : liveError
+              ? "Observations unavailable"
+              : date
+                ? `Historical observations · ${date}`
+                : "Live observations loaded"}
         </div>
 
       </section>
 
-      {/* PERMANENT FILTER TOOLBAR */}
+      {/* FILTER TOOLBAR */}
       <section className="fx-filter-toolbar">
 
         <div className="fx-filter-toolbar-heading">
@@ -532,11 +651,13 @@ const visible = useMemo(() => {
         </div>
 
         <div className="fx-filter-controls">
+
           <div className="fx-control">
             <label>
               <CalendarDays size={14} />
               Observation date
             </label>
+
             <input
               type="date"
               value={date}
@@ -549,6 +670,7 @@ const visible = useMemo(() => {
               <Activity size={14} />
               Confidence
             </label>
+
             <select
               value={confidence}
               onChange={e => setConfidence(e.target.value)}
@@ -565,6 +687,7 @@ const visible = useMemo(() => {
               <Flame size={14} />
               Fire intensity (FRP)
             </label>
+
             <select
               value={intensity}
               onChange={e => setIntensity(e.target.value)}
@@ -575,6 +698,7 @@ const visible = useMemo(() => {
               <option value="High">High · 20+ MW</option>
             </select>
           </div>
+
         </div>
 
         <div className="fx-more-filters-row">
@@ -586,33 +710,43 @@ const visible = useMemo(() => {
           >
             <SlidersHorizontal size={14} />
             More filters
+
             {(selectedState || selectedDistrict) && (
               <span className="fx-more-filters-active">Active</span>
             )}
+
             <ChevronDown size={14} className="fx-more-filters-chevron" />
           </button>
         </div>
 
         {moreFiltersOpen && (
           <div className="fx-more-filters-panel">
+
             <div className="fx-more-filters-intro">
               <strong>Geographic filters</strong>
-              <span>Limit observations to an Indian state/UT and district.</span>
+              <span>
+                Limit observations to an Indian state/UT and district.
+              </span>
             </div>
 
             <div className="fx-filter-controls fx-geographic-controls">
+
               <div className="fx-control">
                 <label>
                   <MapPin size={14} />
                   State / UT
                 </label>
+
                 <select
                   value={selectedState}
                   onChange={e => setSelectedState(e.target.value)}
                 >
                   <option value="">All India</option>
+
                   {stateList.map(state => (
-                    <option key={state.slug} value={state.name}>{state.name}</option>
+                    <option key={state.slug} value={state.name}>
+                      {state.name}
+                    </option>
                   ))}
                 </select>
               </div>
@@ -622,10 +756,15 @@ const visible = useMemo(() => {
                   <MapPin size={14} />
                   District / City
                 </label>
+
                 <select
                   value={selectedDistrict}
                   onChange={e => setSelectedDistrict(e.target.value)}
-                  disabled={!selectedState || districtLoading || districts.length === 0}
+                  disabled={
+                    !selectedState ||
+                    districtLoading ||
+                    districts.length === 0
+                  }
                 >
                   <option value="">
                     {!selectedState
@@ -634,9 +773,12 @@ const visible = useMemo(() => {
                         ? 'Loading districts...'
                         : 'All districts'}
                   </option>
+
                   {districts
                     .slice()
-                    .sort((a, b) => a.properties.name.localeCompare(b.properties.name))
+                    .sort((a, b) =>
+                      a.properties.name.localeCompare(b.properties.name)
+                    )
                     .map(district => (
                       <option
                         key={`${district.properties.state}-${district.properties.name}`}
@@ -646,14 +788,22 @@ const visible = useMemo(() => {
                       </option>
                     ))}
                 </select>
-                <small className="fx-control-note">District boundaries are available; separate city boundaries are not included in this dataset.</small>
+
+                <small className="fx-control-note">
+                  District boundaries are available; separate city boundaries are not included in this dataset.
+                </small>
               </div>
+
             </div>
           </div>
         )}
 
         <div className="fx-filter-explanation">
-          Geographic filters use India state and district boundary polygons. {geoError || (districtLoading ? 'Loading district boundaries...' : `${geographicallyFiltered.length.toLocaleString()} observations within the selected geography.`)}
+          Geographic filters use India state and district boundary polygons.{' '}
+          {geoError ||
+            (districtLoading
+              ? 'Loading district boundaries...'
+              : `${geographicallyFiltered.length.toLocaleString()} observations within the selected geography.`)}
         </div>
 
       </section>
@@ -665,7 +815,9 @@ const visible = useMemo(() => {
           <div>
             <span className="fx-section-kicker">GEOGRAPHIC VISUALIZATION</span>
             <h3>Thermal activity map</h3>
-            <p>Explore individual satellite-detected thermal observations.</p>
+            <p>
+              Explore individual satellite-detected thermal observations.
+            </p>
           </div>
 
           <div className="fx-map-count">
@@ -676,11 +828,11 @@ const visible = useMemo(() => {
 
         <div className="fx-map-frame">
 
-          {error ? (
+          {liveError ? (
             <div className="fx-map-message">
               <Info size={28} />
               <h3>Unable to load observations</h3>
-              <p>{error}</p>
+              <p>{liveError}</p>
 
               <button onClick={refreshData}>
                 Try again
@@ -698,24 +850,26 @@ const visible = useMemo(() => {
               preferCanvas
             >
               <MapFocusController
-                  selected={selected}
-                  feature={
-                    selectedState
-                      ? selectedStateFeature
-                      : states.features.find(
-                          feature =>
-                            feature.properties?.name?.toLowerCase() ===
-                            search.trim().toLowerCase()
-                        ) || null
-                  }
-                />
+                selected={selected}
+                feature={
+                  selectedState
+                    ? selectedStateFeature
+                    : states.features.find(
+                        feature =>
+                          feature.properties?.name?.toLowerCase() ===
+                          search.trim().toLowerCase()
+                      ) || null
+                }
+              />
+
               <TileLayer
-                attribution='Tiles &copy; Esri'
+                attribution="Tiles &copy; Esri"
                 url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
               />
 
               <ZoomControl position="bottomleft" />
 
+              {/* NASA FIRMS OBSERVATION MARKERS */}
               {visible.map(detection => {
                 const color =
                   COLORS[detection.confidence] || COLORS.n;
@@ -731,8 +885,8 @@ const visible = useMemo(() => {
                   <CircleMarker
                     key={detection.id}
                     center={[
-                      detection.latitude,
-                      detection.longitude
+                      Number(detection.latitude),
+                      Number(detection.longitude)
                     ]}
                     radius={radius}
                     pathOptions={{
@@ -746,36 +900,51 @@ const visible = useMemo(() => {
                     }}
                   >
                     <Popup>
-                      <strong>Thermal observation</strong>
+                      <strong>
+                        {date
+                          ? "Historical NASA FIRMS observation"
+                          : "Live NASA FIRMS observation"}
+                      </strong>
                       <br />
                       FRP: {detection.frp} MW
                       <br />
                       Confidence: {confidenceLabel(detection.confidence)}
                       <br />
                       Date: {detection.date}
+                      <br />
+                      Time: {detection.time} UTC
+                      <br />
+                      Satellite: {detection.satellite}
                     </Popup>
                   </CircleMarker>
                 );
               })}
+
             </MapContainer>
           )}
 
-          {loading && (
+          {liveLoading && (
             <div className="fx-map-loading">
               <RefreshCw size={14} />
-              Loading observations...
+              {date
+                ? "Loading historical observations..."
+                : "Loading live observations..."}
             </div>
           )}
 
-          {!loading && !error && visible.length === 0 && (
+          {!liveLoading && !liveError && visible.length === 0 && (
             <div className="fx-map-empty">
-              No observations match the selected filters.
+              {date
+                ? `No observations found for ${date} with the selected filters.`
+                : "No observations match the selected filters."}
             </div>
           )}
 
           <div className="fx-map-overlay-label">
             <span className="fx-live-dot" />
-            NASA FIRMS · THERMAL OBSERVATIONS
+            {date
+              ? `NASA FIRMS · HISTORICAL · ${date}`
+              : "NASA FIRMS · LIVE THERMAL OBSERVATIONS"}
           </div>
 
         </div>
@@ -806,7 +975,7 @@ const visible = useMemo(() => {
 
       </section>
 
-      {/* PERMANENT OBSERVATION DETAILS */}
+      {/* OBSERVATION DETAILS */}
       <section className="fx-observation-section">
 
         <div className="fx-observation-heading">
@@ -838,8 +1007,14 @@ const visible = useMemo(() => {
               </div>
 
               <div>
-                <span className="fx-section-kicker">SELECTED THERMAL OBSERVATION</span>
-                <h2>{selected.frp} <small>MW</small></h2>
+                <span className="fx-section-kicker">
+                  SELECTED THERMAL OBSERVATION
+                </span>
+
+                <h2>
+                  {selected.frp} <small>MW</small>
+                </h2>
+
                 <p>Fire Radiative Power</p>
               </div>
 
@@ -851,6 +1026,7 @@ const visible = useMemo(() => {
                       COLORS[selected.confidence] || COLORS.n
                   }}
                 />
+
                 {confidenceLabel(selected.confidence)} confidence
               </div>
             </div>
@@ -893,7 +1069,6 @@ const visible = useMemo(() => {
               </div>
 
             </div>
-
           </div>
         ) : (
           <div className="fx-no-selection">

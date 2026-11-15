@@ -1308,3 +1308,134 @@
     max-height: 320px;
   }
 }
+
+/* =========================================
+   FLAREX LIVE MAP — CHARCOAL THEME
+   Warm charcoal + orange + subtle teal
+========================================= */
+
+.flare-explore {
+  --fx-bg: #151719;
+  --fx-panel: #202426;
+  --fx-panel-light: #292e30;
+  --fx-border: #3a4143;
+  --fx-muted: #9ba5a7;
+  --fx-text: #edf0ed;
+  --fx-orange: #ff985f;
+  --fx-red: #f16d5e;
+  --fx-teal: #55cbb5;
+  color: var(--fx-text);
+}
+
+/* Header and search */
+.flare-explore .fx-source-status,
+.flare-explore .fx-search {
+  background: #202426;
+  border-color: #3a4143;
+}
+
+.flare-explore .fx-refresh {
+  background: #f18b50;
+  border-color: #f18b50;
+  color: #171a1b;
+}
+
+/* Statistics */
+.flare-explore .fx-stat-card {
+  background: linear-gradient(120deg, #252a2c, #1e2325);
+  border-color: #3a4143;
+}
+
+/* Filters */
+.flare-explore .fx-filter-toolbar {
+  background: #202426;
+  border-color: #3a4143;
+}
+
+.flare-explore .fx-control input,
+.flare-explore .fx-control select {
+  background: #171b1d !important;
+  border-color: #41494b !important;
+}
+
+.flare-explore .fx-reset-button,
+.flare-explore .fx-more-filters-button {
+  background: #292e30;
+  border-color: #41494b;
+}
+
+.flare-explore .fx-more-filters-panel {
+  background: #252a2c;
+  border-color: #3a4143;
+}
+
+/* Search dropdown */
+.flare-explore .fx-search-results {
+  background: #252a2c;
+  border-color: #41494b;
+}
+
+.flare-explore .fx-search-result:hover,
+.flare-explore .fx-search-result:focus-visible {
+  background: #343a3c;
+}
+
+/* Map section */
+.flare-explore .fx-map-section {
+  background: #202426;
+  border-color: #3a4143;
+}
+
+.flare-explore .fx-map-frame {
+  background: #15191b;
+  border-color: #41494b;
+}
+
+.flare-explore .fx-map-frame .leaflet-container {
+  background: #15191b;
+}
+
+/* Map controls and popups */
+.flare-explore .fx-map-frame .leaflet-control-zoom a {
+  background: #252b2d !important;
+  color: #edf0ed !important;
+}
+
+.flare-explore .fx-map-frame .leaflet-control-zoom a:hover {
+  background: #343b3d !important;
+  color: #ff985f !important;
+}
+
+.flare-explore .fx-map-frame .leaflet-popup-content-wrapper,
+.flare-explore .fx-map-frame .leaflet-popup-tip {
+  background: #292f31;
+  color: #edf0ed;
+}
+
+/* Live map indicator */
+.flare-explore .fx-map-overlay-label {
+  background: #191e20ed;
+  border-color: #555e60;
+}
+
+/* Observation inspector */
+.flare-explore .fx-observation-section {
+  background: #202426;
+  border-color: #3a4143;
+}
+
+.flare-explore .fx-observation-content {
+  background: #252a2c;
+  border-color: #41494b;
+}
+
+.flare-explore .fx-no-selection {
+  background: #252a2c;
+  border-color: #41494b;
+}
+
+/* Keep teal reserved for live status */
+.flare-explore .fx-live-dot {
+  background: #55cbb5;
+  box-shadow: 0 0 9px #55cbb577;
+}

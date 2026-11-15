@@ -1,5 +1,5 @@
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -12,7 +12,8 @@ import {
 } from 'lucide-react';
 import './RiskAnalysis.css';
 
-import { API_BASE_URL } from "./api";
+import { API_BASE_URL } from './api';
+
 const API_URL = `${API_BASE_URL}/api/analytics/overview`;
 
 function MetricCard({ icon: Icon, label, value, unit, description }) {
@@ -34,37 +35,67 @@ function MetricCard({ icon: Icon, label, value, unit, description }) {
   );
 }
 
-function RiskAnalysis() {
+function RiskAnalysis({ selectedDate = '' }) {
   const [overview, setOverview] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const fetchOverview = async () => {
+  const fetchOverview = useCallback(async (signal) => {
     setLoading(true);
     setError('');
 
     try {
-      const response = await fetch(API_URL);
+      const params = new URLSearchParams();
+
+      if (selectedDate) {
+        params.set('date', selectedDate);
+      }
+
+      const url = params.toString()
+        ? `${API_URL}?${params.toString()}`
+        : API_URL;
+
+      const response = await fetch(url, { signal });
 
       if (!response.ok) {
-        throw new Error(`API returned status ${response.status}`);
+        let message = `API returned status ${response.status}`;
+
+        try {
+          const errorData = await response.json();
+          if (errorData.detail) {
+            message = errorData.detail;
+          }
+        } catch {
+          // Keep the default error message.
+        }
+
+        throw new Error(message);
       }
 
       const data = await response.json();
       setOverview(data);
     } catch (err) {
+      if (err.name === 'AbortError') return;
+
       console.error('FlareX API error:', err);
       setError(
+        err.message ||
         'Unable to connect to the FlareX backend. Make sure the FastAPI server is running on port 8000.'
       );
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) {
+        setLoading(false);
+      }
     }
-  };
+  }, [selectedDate]);
 
   useEffect(() => {
-    fetchOverview();
-  }, []);
+    const controller = new AbortController();
+
+    fetchOverview(controller.signal);
+
+    return () => controller.abort();
+  }, [fetchOverview]);
 
   const confidence = overview?.confidence ?? {};
 
@@ -91,26 +122,42 @@ function RiskAnalysis() {
     1
   );
 
-  if (loading) {
+  const isHistorical = Boolean(selectedDate);
+
+  const modeLabel = isHistorical
+    ? `Historical observations · ${selectedDate}`
+    : 'Live observations';
+
+  if (loading && !overview) {
     return (
       <div className="risk-analysis-page">
         <div className="risk-loading">
           <RefreshCw className="spin" size={28} />
-          <h2>Loading wildfire intelligence...</h2>
-          <p>Connecting to NASA FIRMS data</p>
+          <h2>
+            Loading {isHistorical ? 'historical' : 'live'} observation analytics...
+          </h2>
+          <p>
+            {isHistorical
+              ? `Retrieving NASA FIRMS observations for ${selectedDate}`
+              : 'Connecting to NASA FIRMS data'}
+          </p>
         </div>
       </div>
     );
   }
 
-  if (error) {
+  if (error && !overview) {
     return (
       <div className="risk-analysis-page">
         <div className="risk-error">
           <AlertTriangle size={32} />
           <h2>Backend connection failed</h2>
           <p>{error}</p>
-          <button onClick={fetchOverview} className="risk-refresh-button">
+
+          <button
+            onClick={() => fetchOverview()}
+            className="risk-refresh-button"
+          >
             <RefreshCw size={16} />
             Retry connection
           </button>
@@ -139,10 +186,10 @@ function RiskAnalysis() {
 
         <button
           className="risk-refresh-button"
-          onClick={fetchOverview}
+          onClick={() => fetchOverview()}
           disabled={loading}
         >
-          <RefreshCw size={16} />
+          <RefreshCw size={16} className={loading ? 'spin' : ''} />
           Refresh data
         </button>
       </div>
@@ -154,17 +201,32 @@ function RiskAnalysis() {
         </div>
 
         <div>
-          <strong>Live backend connection</strong>
+          <strong>
+            {isHistorical
+              ? 'Historical data connection'
+              : 'Live backend connection'}
+          </strong>
+
           <p>
-            Source: {overview?.source || 'NASA FIRMS CSV'}
+            Source: {overview?.source || 'NASA FIRMS NOAA-21'}
           </p>
+
+          <p>{modeLabel}</p>
         </div>
 
         <span className="risk-live-status">
           <span className="risk-status-dot" />
-          Connected
+          {isHistorical ? 'Historical' : 'Connected'}
         </span>
       </div>
+
+      {/* REFRESH ERROR */}
+      {error && (
+        <div className="risk-error">
+          <AlertTriangle size={20} />
+          <p>{error}</p>
+        </div>
+      )}
 
       {/* OVERVIEW */}
       <section className="risk-section">
@@ -172,7 +234,10 @@ function RiskAnalysis() {
           <div>
             <span className="risk-section-tag">01 / OVERVIEW</span>
             <h2>Detection overview</h2>
-            <p>Statistics calculated from the connected FIRMS dataset.</p>
+            <p>
+              Statistics calculated from the {isHistorical ? 'selected date' : 'latest live'}
+              {' '}satellite observations.
+            </p>
           </div>
         </div>
 
@@ -301,8 +366,9 @@ function RiskAnalysis() {
 
           <p className="risk-explanation">
             Fire Radiative Power (FRP) measures the rate at which energy is
-            emitted by a detected fire. It is an indicator of fire intensity,
-            not a direct measurement of burned area.
+            emitted by a detected thermal anomaly. It is an indicator of
+            radiative intensity, not a direct measurement of burned area
+            or proof of a confirmed wildfire.
           </p>
         </div>
       </section>

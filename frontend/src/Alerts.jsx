@@ -15,10 +15,11 @@ import {
 } from 'lucide-react';
 import './Alerts.css';
 
-import { API_BASE_URL } from "./api";
+import { API_BASE_URL } from './api';
+
 const API_URL = `${API_BASE_URL}/api/alerts`;
 
-function Alerts() {
+function Alerts({ selectedDate = '' }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -27,7 +28,9 @@ function Alerts() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [expandedAlert, setExpandedAlert] = useState(null);
 
-  // Fetch alerts whenever filters or search change
+  const isHistorical = Boolean(selectedDate);
+
+  // Fetch alerts whenever filters, search or selected date change.
   useEffect(() => {
     const controller = new AbortController();
 
@@ -42,13 +45,29 @@ function Alerts() {
           search: search.trim(),
         });
 
+        if (selectedDate) {
+          params.set('date', selectedDate);
+        }
+
         const response = await fetch(
           `${API_URL}?${params.toString()}`,
           { signal: controller.signal }
         );
 
         if (!response.ok) {
-          throw new Error(`Server returned ${response.status}`);
+          let message = `Server returned ${response.status}`;
+
+          try {
+            const errorData = await response.json();
+
+            if (errorData.detail) {
+              message = errorData.detail;
+            }
+          } catch {
+            // Keep the default error message.
+          }
+
+          throw new Error(message);
         }
 
         const result = await response.json();
@@ -56,7 +75,9 @@ function Alerts() {
       } catch (err) {
         if (err.name !== 'AbortError') {
           console.error('Alerts API error:', err);
+
           setError(
+            err.message ||
             'Could not load alerts. Check that the FlareX backend is running.'
           );
         }
@@ -67,16 +88,17 @@ function Alerts() {
       }
     };
 
-    // Small delay prevents unnecessary requests while typing
+    // Small delay prevents unnecessary requests while typing.
     const timer = setTimeout(loadAlerts, 300);
 
     return () => {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [filter, search, refreshKey]);
+  }, [filter, search, refreshKey, selectedDate]);
 
   const alerts = data?.alerts ?? [];
+
   const counts = data?.severity_counts ?? {
     critical: 0,
     warning: 0,
@@ -132,8 +154,17 @@ function Alerts() {
         </div>
 
         <div>
-          <strong>FIRMS data feed</strong>
-          <p>{data?.source || 'NASA FIRMS CSV'}</p>
+          <strong>
+            {isHistorical
+              ? 'Historical satellite data'
+              : 'Live satellite data feed'}
+          </strong>
+
+          <p>{data?.source || 'NASA FIRMS NOAA-21'}</p>
+
+          {isHistorical && (
+            <p>Selected date: {selectedDate}</p>
+          )}
         </div>
 
         <span className="alerts-connected">
@@ -142,7 +173,9 @@ function Alerts() {
             ? 'Updating'
             : error
               ? 'Disconnected'
-              : 'Connected'}
+              : isHistorical
+                ? 'Historical'
+                : 'Connected'}
         </span>
       </div>
 
@@ -165,7 +198,10 @@ function Alerts() {
 
           <span>Total screening alerts</span>
           <strong>{totalAlerts.toLocaleString()}</strong>
-          <small>Generated from FIRMS detections</small>
+
+          <small>
+            Generated from {isHistorical ? 'selected-date' : 'live'} thermal observations
+          </small>
         </div>
 
         <div className="alerts-summary-card">
@@ -347,6 +383,7 @@ function Alerts() {
                       }
                     >
                       {isExpanded ? 'Hide details' : 'View details'}
+
                       <ChevronDown
                         size={15}
                         className={isExpanded ? 'rotated' : ''}

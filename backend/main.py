@@ -1,13 +1,31 @@
-from pathlib import Path
+
+from datetime import datetime, timedelta
+from threading import Lock
+from time import monotonic
+from functools import wraps
+import requests
 
 import numpy as np
-from functools import lru_cache
 import pandas as pd
-from auth import router as auth_router, User
-from database import Base, engine
-from fastapi import FastAPI, Query
+
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.cluster import DBSCAN
+
+if __package__:
+    from .auth import router as auth_router
+    from .database import Base, engine
+    from .firms_service import (
+        fetch_recent_observations,
+        fetch_observations_for_date
+    )
+else:
+    from auth import router as auth_router
+    from database import Base, engine
+    from firms_service import (
+        fetch_recent_observations,
+        fetch_observations_for_date
+    )
 
 
 # ==================================================
@@ -16,13 +34,11 @@ from sklearn.cluster import DBSCAN
 
 app = FastAPI(
     title="FlareX API",
-    description="Wildfire thermal detection and intelligence API",
-    version="1.1.0"
+    description="Live wildfire thermal observation intelligence API",
+    version="2.0.0"
 )
-# Initialize authentication database tables
-Base.metadata.create_all(bind=engine)
 
-# Register authentication routes
+Base.metadata.create_all(bind=engine)
 app.include_router(auth_router)
 
 app.add_middleware(
@@ -41,37 +57,147 @@ app.add_middleware(
 
 
 # ==================================================
-# 2. DATASET LOADING
+# 2. LIVE DATA CONFIGURATION
 # ==================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SOURCE = "NASA FIRMS - VIIRS NOAA-21 NRT"
+DEFAULT_DAY_RANGE = 1
 
-CSV_PATH = (
-    PROJECT_ROOT
-    / "data"
-    / "raw"
-    / "DL_FIRE_J2V-C2_837818"
-    / "fire_nrt_J2V-C2_837818.csv"
-)
+CACHE_TTL_SECONDS = 60
+HISTORICAL_CACHE_TTL_SECONDS = 15 * 60
 
-if not CSV_PATH.exists():
-    raise FileNotFoundError(
-        f"FIRMS dataset not found: {CSV_PATH}"
-    )
+_cache = {}
+_historical_cache = {}
+_cache_lock = Lock()
 
-df = pd.read_csv(CSV_PATH)
-df.columns = df.columns.str.strip().str.lower()
+EARTH_RADIUS_KM = 6371.0088
+CLUSTER_DISTANCE_KM = 2.0
 
-print(f"FlareX loaded {len(df)} FIRMS detections.")
+SEVERITY_ORDER = {
+    "Critical": 0,
+    "Warning": 1,
+    "Informational": 2
+}
 
 
 # ==================================================
-# 3. DATA PREPARATION
+# 3. LIVE DATA FETCHING AND NORMALIZATION
 # ==================================================
 
-def prepare_dataframe():
+def get_live_snapshot(day_range=DEFAULT_DAY_RANGE, force_refresh=False):
+    cache_key = day_range
+    now = monotonic()
 
-    data = df.copy()
+    with _cache_lock:
+        cached = _cache.get(cache_key)
+
+        if (
+            cached
+            and not force_refresh
+            and now - cached["timestamp"] < CACHE_TTL_SECONDS
+        ):
+            return cached["observations"]
+
+        try:
+            observations = fetch_recent_observations(
+                day_range=day_range
+            )
+
+            if not isinstance(observations, list):
+                raise ValueError("NASA FIRMS returned an invalid response.")
+
+            _cache[cache_key] = {
+                "timestamp": monotonic(),
+                "observations": observations
+            }
+
+            return observations
+
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(
+                status_code=502,
+                detail=f"NASA FIRMS data unavailable: {error}"
+            ) from error
+
+
+def get_historical_snapshot(selected_date):
+    """Fetch and cache one NASA FIRMS historical date snapshot."""
+
+    try:
+        datetime.strptime(selected_date, "%Y-%m-%d")
+    except (TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail="date must use YYYY-MM-DD format."
+        ) from error
+
+    now = monotonic()
+
+    with _cache_lock:
+        cached = _historical_cache.get(selected_date)
+
+        if (
+            cached
+            and now - cached["timestamp"] < HISTORICAL_CACHE_TTL_SECONDS
+        ):
+            return cached["observations"], cached["source"]
+
+    try:
+        result = fetch_observations_for_date(selected_date)
+        observations = result.get("observations", [])
+
+        if not isinstance(observations, list):
+            raise ValueError(
+                "NASA FIRMS returned an invalid historical response."
+            )
+
+        source = result.get(
+            "source",
+            "NASA FIRMS Historical Archive"
+        )
+
+        with _cache_lock:
+            _historical_cache[selected_date] = {
+                "timestamp": monotonic(),
+                "observations": observations,
+                "source": source
+            }
+
+        return observations, source
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=404,
+            detail=str(error)
+        ) from error
+
+    except (RuntimeError, requests.RequestException) as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"NASA FIRMS historical data unavailable: {error}"
+        ) from error
+
+
+def prepare_live_dataframe(day_range=DEFAULT_DAY_RANGE, date=None):
+
+    if date:
+        observations, _ = get_historical_snapshot(date)
+    else:
+        observations = get_live_snapshot(day_range)
+
+    if not observations:
+        return pd.DataFrame(
+            columns=[
+                "latitude",
+                "longitude",
+                "frp",
+                "confidence",
+                "_datetime"
+            ]
+        )
+
+    data = pd.DataFrame(observations)
+    data.columns = data.columns.str.strip().str.lower()
 
     required = [
         "latitude",
@@ -86,8 +212,9 @@ def prepare_dataframe():
     ]
 
     if missing:
-        raise ValueError(
-            f"Missing required columns: {missing}"
+        raise HTTPException(
+            status_code=502,
+            detail=f"NASA FIRMS response is missing fields: {missing}"
         )
 
     for column in ["latitude", "longitude", "frp"]:
@@ -115,11 +242,11 @@ def prepare_dataframe():
 
     if "acq_date" in data.columns:
 
-        date_values = data["acq_date"].astype(str)
+        dates = data["acq_date"].astype(str)
 
         if "acq_time" in data.columns:
 
-            time_values = (
+            times = (
                 pd.to_numeric(
                     data["acq_time"],
                     errors="coerce"
@@ -131,25 +258,92 @@ def prepare_dataframe():
             )
 
             data["_datetime"] = pd.to_datetime(
-                date_values + " " + time_values,
+                dates + " " + times,
                 format="%Y-%m-%d %H%M",
                 errors="coerce"
             )
 
         else:
             data["_datetime"] = pd.to_datetime(
-                date_values,
+                dates,
                 errors="coerce"
             )
 
     else:
         data["_datetime"] = pd.NaT
 
-    return data
+    return data.reset_index(drop=True)
+
+
+def safe_string(value, default="Unknown"):
+    if pd.isna(value):
+        return default
+
+    return str(value)
+
+
+def confidence_counts(data):
+
+    values = data["confidence"].value_counts().to_dict()
+
+    return {
+        "high": int(values.get("h", 0)),
+        "nominal": int(values.get("n", 0)),
+        "low": int(values.get("l", 0))
+    }
+
+
+def frp_summary(data):
+
+    values = data["frp"].dropna()
+
+    return {
+        "average": (
+            round(float(values.mean()), 2)
+            if not values.empty else 0
+        ),
+        "median": (
+            round(float(values.median()), 2)
+            if not values.empty else 0
+        ),
+        "maximum": (
+            round(float(values.max()), 2)
+            if not values.empty else 0
+        )
+    }
+
+
+def serialize_detection(index, row):
+
+    detection_time = row["_datetime"]
+
+    return {
+        "id": int(index),
+        "latitude": round(float(row["latitude"]), 5),
+        "longitude": round(float(row["longitude"]), 5),
+        "frp": round(float(row["frp"]), 2),
+        "confidence": safe_string(
+            row["confidence"],
+            "unknown"
+        ),
+        "date": (
+            detection_time.strftime("%Y-%m-%d")
+            if pd.notna(detection_time)
+            else safe_string(row.get("acq_date"), "Unknown")
+        ),
+        "time": (
+            detection_time.strftime("%H:%M")
+            if pd.notna(detection_time)
+            else str(row.get("acq_time", "Unknown"))
+        ),
+        "satellite": safe_string(row.get("satellite")),
+        "instrument": safe_string(row.get("instrument")),
+        "daynight": safe_string(row.get("daynight"))
+    }
 
 
 # ==================================================
-# 4. HOME ENDPOINT
+# 4. HOME / HEALTH CHECK
 # ==================================================
 
 @app.get("/")
@@ -157,78 +351,218 @@ def home():
 
     return {
         "message": "FlareX API is running",
-        "dataset": "NASA FIRMS CSV",
-        "total_rows": int(len(df))
+        "mode": "LIVE",
+        "source": SOURCE,
+        "satellite": "VIIRS NOAA-21",
+        "coverage": "India FIRMS area feed",
+        "refresh_interval_minutes": 15,
+        "data_type": "Satellite thermal observations",
+        "note": (
+            "Thermal observations are not necessarily "
+            "confirmed wildfire incidents."
+        )
     }
 
 
 # ==================================================
-# 5. ANALYTICS OVERVIEW
+# 5. LIVE OBSERVATIONS
+# ==================================================
+
+@app.get("/api/live-observations")
+def get_live_observations(
+    day_range: int = Query(default=1, ge=1, le=5),
+    refresh: bool = Query(default=False)
+):
+
+    observations = get_live_snapshot(
+        day_range=day_range,
+        force_refresh=refresh
+    )
+
+    return {
+        "total_observations": len(observations),
+        "day_range_days": day_range,
+        "observations": observations,
+        "source": SOURCE,
+        "last_updated": datetime.utcnow().isoformat() + "Z",
+        "note": (
+            "Thermal satellite detections are not necessarily "
+            "confirmed fire incidents. Acquisition time is not "
+            "the same as fire start time."
+        )
+    }
+
+
+# ==================================================
+# 5A. HISTORICAL OBSERVATIONS
+# ==================================================
+
+@app.get("/api/historical-observations")
+def get_historical_observations(
+    date: str = Query(
+        ...,
+        description="Date in YYYY-MM-DD format"
+    )
+):
+
+    observations, archive_source = get_historical_snapshot(date)
+
+    return {
+        "date": date,
+        "total_observations": len(observations),
+        "observations": observations,
+        "source": f"NASA FIRMS - {archive_source}",
+        "mode": "HISTORICAL",
+        "last_updated": datetime.utcnow().isoformat() + "Z",
+        "note": (
+            "Observations acquired on the selected date. "
+            "These are satellite thermal anomalies, not "
+            "necessarily confirmed wildfire incidents."
+        )
+    }
+
+
+# ==================================================
+# 6. ANALYTICS OVERVIEW
 # ==================================================
 
 @app.get("/api/analytics/overview")
-def get_overview():
+def get_overview(
+    date: str = Query(
+        default="",
+        description="Optional historical date YYYY-MM-DD"
+    )
+):
 
-    confidence = (
-        df["confidence"]
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        .value_counts()
-        .to_dict()
+    data = prepare_live_dataframe(date=date or None)
+
+    historical = bool(date)
+
+    _, archive_source = (
+        get_historical_snapshot(date)
+        if historical else ([], "")
     )
 
-    frp = pd.to_numeric(
-        df["frp"],
-        errors="coerce"
-    ).dropna()
-
     return {
-        "total_detections": int(len(df)),
-        "confidence": {
-            "high": int(confidence.get("h", 0)),
-            "nominal": int(confidence.get("n", 0)),
-            "low": int(confidence.get("l", 0))
-        },
-        "frp": {
-            "average": round(float(frp.mean()), 2) if not frp.empty else 0,
-            "median": round(float(frp.median()), 2) if not frp.empty else 0,
-            "maximum": round(float(frp.max()), 2) if not frp.empty else 0
-        },
-        "source": "NASA FIRMS CSV"
+        "total_detections": int(len(data)),
+        "confidence": confidence_counts(data),
+        "frp": frp_summary(data),
+        "source": (
+            f"NASA FIRMS - {archive_source}"
+            if historical else SOURCE
+        ),
+        "mode": "HISTORICAL" if historical else "LIVE",
+        "date": date or None
     }
 
 
 # ==================================================
-# 6. ALERT CONFIGURATION
+# 7. INDIVIDUAL DETECTIONS
 # ==================================================
 
-EARTH_RADIUS_KM = 6371.0088
-CLUSTER_DISTANCE_KM = 2.0
+@app.get("/api/detections")
+def get_detections(
+    limit: int = Query(default=10000, ge=1, le=15000),
+    confidence: str = Query(default="All"),
+    min_frp: float = Query(default=0, ge=0),
+    max_frp: float = Query(default=10000, ge=0),
+    date: str = Query(default="")
+):
 
-SEVERITY_ORDER = {
-    "Critical": 0,
-    "Warning": 1,
-    "Informational": 2
-}
+    if min_frp > max_frp:
+        raise HTTPException(
+            status_code=400,
+            detail="min_frp cannot be greater than max_frp."
+        )
+
+    data = prepare_live_dataframe(date=date or None)
+
+    if confidence.lower() != "all":
+
+        confidence_map = {
+            "high": "h",
+            "nominal": "n",
+            "low": "l"
+        }
+
+        selected = confidence_map.get(confidence.lower())
+
+        if selected:
+            data = data[
+                data["confidence"] == selected
+            ]
+
+    data = data[
+        (data["frp"] >= min_frp)
+        & (data["frp"] <= max_frp)
+    ]
+
+    if date:
+        data = data[
+            data["_datetime"].dt.strftime("%Y-%m-%d") == date
+        ]
+
+    data = data.sort_values(
+        "_datetime",
+        ascending=False,
+        na_position="last"
+    )
+
+    total = len(data)
+
+    data = data.head(limit)
+
+    detections = [
+        serialize_detection(index, row)
+        for index, row in data.iterrows()
+    ]
+
+    return {
+        "total_detections": int(total),
+        "returned": len(detections),
+        "filters": {
+            "confidence": confidence,
+            "min_frp": min_frp,
+            "max_frp": max_frp,
+            "date": date
+        },
+        "detections": detections,
+        "source": (
+            f"NASA FIRMS - {get_historical_snapshot(date)[1]}"
+            if date else SOURCE
+        ),
+        "mode": "HISTORICAL" if date else "LIVE"
+    }
 
 
 # ==================================================
-# 7. ALERT GENERATION AND FILTERING
+# 8. LIVE SCREENING ALERTS
 # ==================================================
-
 
 @app.get("/api/alerts")
-@lru_cache(maxsize=128)
 def get_alerts(
     limit: int = Query(default=10, ge=1, le=50),
     severity: str = Query(default="All"),
-    search: str = Query(default="")
+    search: str = Query(default=""),
+    date: str = Query(
+        default="",
+        description="Optional historical date YYYY-MM-DD"
+    )
 ):
 
-    alerts_df = prepare_dataframe()
+    data = prepare_live_dataframe(date=date or None)
 
-    if alerts_df.empty:
+    historical = bool(date)
+
+    source = (
+        f"NASA FIRMS - {get_historical_snapshot(date)[1]}"
+        if historical else SOURCE
+    )
+
+    mode = "HISTORICAL" if historical else "LIVE"
+
+    if len(data) < 2:
+
         return {
             "total_alerts": 0,
             "matched_alerts": 0,
@@ -239,11 +573,13 @@ def get_alerts(
                 "informational": 0
             },
             "alerts": [],
-            "source": "NASA FIRMS CSV"
+            "source": source,
+            "mode": mode,
+            "cluster_distance_km": CLUSTER_DISTANCE_KM
         }
 
     coordinates = np.radians(
-        alerts_df[["latitude", "longitude"]].to_numpy()
+        data[["latitude", "longitude"]].to_numpy()
     )
 
     clusterer = DBSCAN(
@@ -253,61 +589,64 @@ def get_alerts(
         algorithm="ball_tree"
     )
 
-    alerts_df["_cluster"] = clusterer.fit_predict(coordinates)
+    data["_cluster"] = clusterer.fit_predict(coordinates)
 
     generated_alerts = []
 
-    clustered_data = alerts_df[
-        alerts_df["_cluster"] != -1
+    clustered_data = data[
+        data["_cluster"] != -1
     ]
 
     for cluster_id, group in clustered_data.groupby("_cluster"):
 
         count = len(group)
+
         max_frp = float(group["frp"].max())
+
         average_frp = float(group["frp"].mean())
 
-        confidence_values = group["confidence"]
+        counts = confidence_counts(group)
 
-        high_count = int((confidence_values == "h").sum())
-        nominal_count = int((confidence_values == "n").sum())
-        low_count = int((confidence_values == "l").sum())
+        high_count = counts["high"]
 
         if max_frp >= 50 or (count >= 5 and max_frp >= 20):
             level = "Critical"
+
         elif count >= 3 or max_frp >= 10 or high_count >= 2:
             level = "Warning"
+
         else:
             level = "Informational"
 
         latest = group["_datetime"].max()
 
-        satellites = []
-
-        if "satellite" in group.columns:
-            satellites = sorted(
+        satellites = (
+            sorted(
                 group["satellite"]
                 .dropna()
                 .astype(str)
                 .unique()
                 .tolist()
             )
+            if "satellite" in group.columns
+            else []
+        )
 
         generated_alerts.append({
             "id": f"cluster-{int(cluster_id)}",
             "title": "Geographic hotspot cluster",
             "severity": level,
-            "latitude": round(float(group["latitude"].mean()), 5),
-            "longitude": round(float(group["longitude"].mean()), 5),
+            "latitude": round(
+                float(group["latitude"].mean()), 5
+            ),
+            "longitude": round(
+                float(group["longitude"].mean()), 5
+            ),
             "detection_count": int(count),
             "maximum_frp": round(max_frp, 2),
             "average_frp": round(average_frp, 2),
             "high_confidence_count": high_count,
-            "confidence_distribution": {
-                "high": high_count,
-                "nominal": nominal_count,
-                "low": low_count
-            },
+            "confidence_distribution": counts,
             "latest_detection": (
                 latest.strftime("%Y-%m-%d %H:%M UTC")
                 if pd.notna(latest)
@@ -315,37 +654,42 @@ def get_alerts(
             ),
             "_sort_time": (
                 latest.timestamp()
-                if pd.notna(latest)
-                else 0
+                if pd.notna(latest) else 0
             ),
             "satellites": satellites
         })
 
-    isolated = alerts_df[
-        (alerts_df["_cluster"] == -1)
-        & (alerts_df["frp"] >= 20)
-        & (alerts_df["confidence"] == "h")
+    isolated = data[
+        (data["_cluster"] == -1)
+        & (data["frp"] >= 20)
+        & (data["confidence"] == "h")
     ]
 
     for index, row in isolated.iterrows():
 
         detection_time = row["_datetime"]
 
-        satellite = (
-            str(row["satellite"])
-            if "satellite" in row.index and pd.notna(row["satellite"])
-            else "Unknown"
+        satellite = safe_string(
+            row.get("satellite")
         )
 
         generated_alerts.append({
             "id": f"detection-{index}",
             "title": "High-intensity isolated detection",
             "severity": "Warning",
-            "latitude": round(float(row["latitude"]), 5),
-            "longitude": round(float(row["longitude"]), 5),
+            "latitude": round(
+                float(row["latitude"]), 5
+            ),
+            "longitude": round(
+                float(row["longitude"]), 5
+            ),
             "detection_count": 1,
-            "maximum_frp": round(float(row["frp"]), 2),
-            "average_frp": round(float(row["frp"]), 2),
+            "maximum_frp": round(
+                float(row["frp"]), 2
+            ),
+            "average_frp": round(
+                float(row["frp"]), 2
+            ),
             "high_confidence_count": 1,
             "confidence_distribution": {
                 "high": 1,
@@ -376,16 +720,16 @@ def get_alerts(
 
     severity_counts = {
         "critical": sum(
-            a["severity"] == "Critical"
-            for a in generated_alerts
+            alert["severity"] == "Critical"
+            for alert in generated_alerts
         ),
         "warning": sum(
-            a["severity"] == "Warning"
-            for a in generated_alerts
+            alert["severity"] == "Warning"
+            for alert in generated_alerts
         ),
         "informational": sum(
-            a["severity"] == "Informational"
-            for a in generated_alerts
+            alert["severity"] == "Informational"
+            for alert in generated_alerts
         )
     }
 
@@ -399,12 +743,12 @@ def get_alerts(
     if severity not in valid_severities:
         severity = "All"
 
-    filtered_alerts = generated_alerts
+    filtered = generated_alerts
 
     if severity != "All":
-        filtered_alerts = [
-            alert
-            for alert in filtered_alerts
+
+        filtered = [
+            alert for alert in filtered
             if alert["severity"] == severity
         ]
 
@@ -414,36 +758,33 @@ def get_alerts(
 
         def matches(alert):
 
-            searchable_values = [
-                str(alert["id"]),
-                str(alert["title"]),
-                str(alert["severity"]),
-                str(alert["latitude"]),
-                str(alert["longitude"]),
-                str(alert["maximum_frp"]),
-                str(alert["average_frp"]),
-                str(alert["detection_count"]),
-                str(alert["latest_detection"]),
+            values = [
+                alert["id"],
+                alert["title"],
+                alert["severity"],
+                alert["latitude"],
+                alert["longitude"],
+                alert["maximum_frp"],
+                alert["average_frp"],
+                alert["detection_count"],
+                alert["latest_detection"],
                 " ".join(alert["satellites"]),
-                str(alert["high_confidence_count"])
+                alert["high_confidence_count"]
             ]
 
             return any(
-                query in value.lower()
-                for value in searchable_values
+                query in str(value).lower()
+                for value in values
             )
 
-        filtered_alerts = [
-            alert
-            for alert in filtered_alerts
+        filtered = [
+            alert for alert in filtered
             if matches(alert)
         ]
 
-    matched_alerts = len(filtered_alerts)
-
     visible_alerts = []
 
-    for alert in filtered_alerts[:limit]:
+    for alert in filtered[:limit]:
 
         public_alert = {
             key: value
@@ -455,14 +796,15 @@ def get_alerts(
 
     return {
         "total_alerts": total_alerts,
-        "matched_alerts": matched_alerts,
+        "matched_alerts": len(filtered),
         "returned": len(visible_alerts),
         "severity_counts": severity_counts,
         "active_filter": severity,
         "search": search,
         "alerts": visible_alerts,
         "cluster_distance_km": CLUSTER_DISTANCE_KM,
-        "source": "NASA FIRMS CSV",
+        "source": source,
+        "mode": mode,
         "rules": {
             "critical": (
                 "Maximum FRP >= 50 MW, or at least 5 "
@@ -474,49 +816,123 @@ def get_alerts(
             ),
             "informational": "Other geographic clusters",
             "isolated_detection": (
-                "High-confidence isolated detection "
-                "with FRP >= 20 MW"
+                "High-confidence isolated detection with FRP >= 20 MW"
             )
         },
         "note": (
-            "These are screening alerts generated from satellite "
-            "thermal detections. They are not confirmed wildfire "
-            "incidents. A geographic cluster is not necessarily "
-            "a single fire."
+            "These are preliminary screening alerts generated from "
+            "satellite thermal detections. They are not confirmed "
+            "wildfire incidents. Geographic proximity does not prove "
+            "that detections belong to one fire."
         )
     }
 
 
 # ==================================================
-# 8. DATA & METHODS ANALYTICS
+# 9. DATA & METHODS ANALYTICS
 # ==================================================
 
+def get_weekly_comparison(selected_date):
+    """
+    Return seven daily observation counts ending on selected_date.
+
+    The selected date is included, along with the previous six days.
+    Unavailable archive dates are represented as None, not zero.
+    """
+
+    try:
+        anchor_date = datetime.strptime(
+            selected_date,
+            "%Y-%m-%d"
+        ).date()
+
+    except (TypeError, ValueError) as error:
+
+        raise HTTPException(
+            status_code=400,
+            detail="date must use YYYY-MM-DD format."
+        ) from error
+
+    weekly_comparison = []
+
+    for offset in range(6, -1, -1):
+
+        current_date = anchor_date - timedelta(days=offset)
+
+        date_string = current_date.strftime("%Y-%m-%d")
+
+        try:
+            daily_data = prepare_live_dataframe(
+                date=date_string
+            )
+
+            detections = int(len(daily_data))
+            available = True
+
+        except HTTPException as error:
+
+            if error.status_code == 404:
+                detections = None
+                available = False
+
+            else:
+                raise
+
+        weekly_comparison.append({
+            "date": date_string,
+            "detections": detections,
+            "available": available
+        })
+
+    return weekly_comparison
+
+
 @app.get("/api/analytics/charts")
-def get_analytics_charts():
+def get_analytics_charts(
+    date: str = Query(
+        default="",
+        description="Optional historical date YYYY-MM-DD"
+    )
+):
 
-    data = prepare_dataframe()
-
-    if data.empty:
-        return {
-            "total_observations": 0,
-            "confidence_distribution": [],
-            "frp_distribution": [],
-            "daily_activity": [],
-            "hourly_activity": [],
-            "source": "NASA FIRMS CSV"
-        }
-
-    confidence_counts = (
-        data["confidence"]
-        .value_counts()
-        .to_dict()
+    # Selected date controls the KPI and distribution calculations.
+    data = prepare_live_dataframe(
+        date=date or None
     )
 
+    historical = bool(date)
+
+    source = (
+        f"NASA FIRMS - {get_historical_snapshot(date)[1]}"
+        if historical else SOURCE
+    )
+
+    mode = "HISTORICAL" if historical else "LIVE"
+
+    # --------------------------------------------------
+    # CONFIDENCE DISTRIBUTION
+    # --------------------------------------------------
+
+    confidence = confidence_counts(data)
+
     confidence_distribution = [
-        {"category": "High", "count": int(confidence_counts.get("h", 0))},
-        {"category": "Nominal", "count": int(confidence_counts.get("n", 0))},
-        {"category": "Low", "count": int(confidence_counts.get("l", 0))}
+        {
+            "category": "High",
+            "count": confidence["high"]
+        },
+        {
+            "category": "Nominal",
+            "count": confidence["nominal"]
+        },
+        {
+            "category": "Low",
+            "count": confidence["low"]
+        }
     ]
+
+    # --------------------------------------------------
+    # FRP DISTRIBUTION
+    # --------------------------------------------------
 
     frp_bins = [
         (0, 1, "0–1 MW"),
@@ -532,8 +948,13 @@ def get_analytics_charts():
     for lower, upper, label in frp_bins:
 
         if upper == float("inf"):
-            count = int((data["frp"] >= lower).sum())
+
+            count = int(
+                (data["frp"] >= lower).sum()
+            )
+
         else:
+
             count = int(
                 (
                     (data["frp"] >= lower)
@@ -546,6 +967,10 @@ def get_analytics_charts():
             "observations": count
         })
 
+    # --------------------------------------------------
+    # DAILY ACTIVITY
+    # --------------------------------------------------
+
     valid_dates = data.dropna(
         subset=["_datetime"]
     ).copy()
@@ -555,7 +980,8 @@ def get_analytics_charts():
     if not valid_dates.empty:
 
         valid_dates["date"] = (
-            valid_dates["_datetime"].dt.strftime("%Y-%m-%d")
+            valid_dates["_datetime"]
+            .dt.strftime("%Y-%m-%d")
         )
 
         daily_counts = (
@@ -566,11 +992,27 @@ def get_analytics_charts():
 
         daily_activity = [
             {
-                "date": str(date),
+                "date": str(date_value),
                 "detections": int(count)
             }
-            for date, count in daily_counts.items()
+            for date_value, count in daily_counts.items()
         ]
+
+    # --------------------------------------------------
+    # SEVEN-DAY COMPARISON
+    # --------------------------------------------------
+
+    comparison_anchor = (
+        date or datetime.utcnow().strftime("%Y-%m-%d")
+    )
+
+    weekly_comparison = get_weekly_comparison(
+        comparison_anchor
+    )
+
+    # --------------------------------------------------
+    # HOURLY ACTIVITY
+    # --------------------------------------------------
 
     hourly_activity = []
 
@@ -597,112 +1039,43 @@ def get_analytics_charts():
             for hour, count in hourly_counts.items()
         ]
 
-    frp = data["frp"]
+    # --------------------------------------------------
+    # FINAL RESPONSE
+    # --------------------------------------------------
 
     return {
         "total_observations": int(len(data)),
+
         "confidence_distribution": confidence_distribution,
+
         "frp_distribution": frp_distribution,
+
         "daily_activity": daily_activity,
+
+        "weekly_comparison": weekly_comparison,
+
+        "weekly_comparison_period": {
+            "start_date": weekly_comparison[0]["date"],
+            "end_date": weekly_comparison[-1]["date"]
+        },
+
         "hourly_activity": hourly_activity,
-        "frp_summary": {
-            "average": round(float(frp.mean()), 2),
-            "median": round(float(frp.median()), 2),
-            "maximum": round(float(frp.max()), 2)
-        },
-        "source": "NASA FIRMS CSV",
+
+        "frp_summary": frp_summary(data),
+
+        "source": source,
+
+        "mode": mode,
+
+        "date": date or None,
+
         "note": (
-            "Acquisition timestamps represent satellite observation "
-            "times, not necessarily the actual time a fire started. "
-            "Hourly values are grouped by the dataset's acquisition "
-            "time field."
+            "Analytics are calculated from the selected NASA FIRMS "
+            "observation snapshot. "
+            "The weekly comparison uses seven individual daily "
+            "historical archive snapshots. "
+            "Acquisition times are satellite observation times, "
+            "not necessarily fire start times. "
+            "Hourly values use the FIRMS acquisition time field."
         )
-    }
-
-
-# ==================================================
-# 9. INDIVIDUAL DETECTIONS FOR EXPLORE MAP
-# ==================================================
-
-@app.get("/api/detections")
-def get_detections(
-    limit: int = Query(default=10000, ge=1, le=15000),
-    confidence: str = Query(default="All"),
-    min_frp: float = Query(default=0, ge=0),
-    max_frp: float = Query(default=10000, ge=0),
-    date: str = Query(default="")
-):
-
-    data = prepare_dataframe()
-
-    if confidence.lower() != "all":
-
-        confidence_map = {
-            "high": "h",
-            "nominal": "n",
-            "low": "l"
-        }
-
-        selected = confidence_map.get(confidence.lower())
-
-        if selected:
-            data = data[data["confidence"] == selected]
-
-    data = data[
-        (data["frp"] >= min_frp)
-        & (data["frp"] <= max_frp)
-    ]
-
-    if date:
-        data = data[
-            data["_datetime"].dt.strftime("%Y-%m-%d") == date
-        ]
-
-    data = data.sort_values(
-        "_datetime",
-        ascending=False,
-        na_position="last"
-    )
-
-    total = len(data)
-    data = data.head(limit)
-
-    detections = []
-
-    for index, row in data.iterrows():
-
-        detection_date = row["_datetime"]
-
-        detections.append({
-            "id": int(index),
-            "latitude": round(float(row["latitude"]), 5),
-            "longitude": round(float(row["longitude"]), 5),
-            "frp": round(float(row["frp"]), 2),
-            "confidence": str(row["confidence"]),
-            "date": (
-                detection_date.strftime("%Y-%m-%d")
-                if pd.notna(detection_date)
-                else "Unknown"
-            ),
-            "time": (
-                detection_date.strftime("%H:%M")
-                if pd.notna(detection_date)
-                else "Unknown"
-            ),
-            "satellite": str(row.get("satellite", "Unknown")),
-            "instrument": str(row.get("instrument", "Unknown")),
-            "daynight": str(row.get("daynight", "Unknown"))
-        })
-
-    return {
-        "total_detections": int(total),
-        "returned": len(detections),
-        "filters": {
-            "confidence": confidence,
-            "min_frp": min_frp,
-            "max_frp": max_frp,
-            "date": date
-        },
-        "detections": detections,
-        "source": "NASA FIRMS CSV"
     }

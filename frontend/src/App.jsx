@@ -102,7 +102,9 @@ function HomeMapControls() {
 }
 
 // Shared application shell
-function AppLayout({ children, navigation, activePage, navigate, onLogout }) {
+// The global date toolbar has been removed.
+// Historical date selection is now restricted to Data & Methods.
+function AppLayout({ children, navigation, activePage, navigate }) {
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -198,11 +200,13 @@ function App() {
 
         const userData = await response.json();
         setUser(userData);
+
       } catch (error) {
         localStorage.removeItem('flarex-token');
         localStorage.removeItem('flarex-user');
         sessionStorage.removeItem('flarex-token');
         sessionStorage.removeItem('flarex-user');
+
       } finally {
         setAuthChecked(true);
       }
@@ -211,7 +215,8 @@ function App() {
     restoreSession();
   }, []);
 
-  // Fetch dashboard data
+  // Fetch LIVE dashboard data
+  // This is deliberately independent of the Data & Methods date selector.
   useEffect(() => {
     if (!user) return;
 
@@ -224,12 +229,19 @@ function App() {
       const options = { signal: controller.signal };
 
       try {
-        const [overviewResponse, detectionResponse, alertResponse] =
-          await Promise.all([
-            fetch(`${API}/api/analytics/overview`, options),
-            fetch(`${API}/api/detections?limit=1200`, options),
-            fetch(`${API}/api/alerts?limit=10`, options)
-          ]);
+        const overviewUrl = `${API}/api/analytics/overview`;
+        const detectionsUrl = `${API}/api/detections?limit=1200`;
+        const alertsUrl = `${API}/api/alerts?limit=10`;
+
+        const [
+          overviewResponse,
+          detectionResponse,
+          alertResponse
+        ] = await Promise.all([
+          fetch(overviewUrl, options),
+          fetch(detectionsUrl, options),
+          fetch(alertsUrl, options)
+        ]);
 
         if (!overviewResponse.ok) {
           throw new Error('Unable to load dashboard statistics.');
@@ -243,12 +255,15 @@ function App() {
           throw new Error('Unable to load geographic alerts.');
         }
 
-        const [overviewData, detectionData, alertData] =
-          await Promise.all([
-            overviewResponse.json(),
-            detectionResponse.json(),
-            alertResponse.json()
-          ]);
+        const [
+          overviewData,
+          detectionData,
+          alertData
+        ] = await Promise.all([
+          overviewResponse.json(),
+          detectionResponse.json(),
+          alertResponse.json()
+        ]);
 
         if (!Array.isArray(detectionData.detections)) {
           throw new Error('Invalid detection data received.');
@@ -256,14 +271,24 @@ function App() {
 
         setOverview(overviewData);
         setDetections(detectionData.detections);
-        setAlerts(Array.isArray(alertData.alerts) ? alertData.alerts : []);
+
+        setAlerts(
+          Array.isArray(alertData.alerts)
+            ? alertData.alerts
+            : []
+        );
+
         setLastUpdated(new Date());
 
       } catch (err) {
         if (err.name !== 'AbortError') {
           console.error('FlareX dashboard error:', err);
-          setError(err.message || 'Unable to connect to FlareX API.');
+
+          setError(
+            err.message || 'Unable to connect to FlareX API.'
+          );
         }
+
       } finally {
         if (!controller.signal.aborted) {
           setLoading(false);
@@ -287,7 +312,9 @@ function App() {
     const result = loadDistricts(selectedState);
 
     setDistricts(
-      Array.isArray(result) ? result : result?.features || []
+      Array.isArray(result)
+        ? result
+        : result?.features || []
     );
 
     setSelectedDistrict('');
@@ -390,6 +417,7 @@ function App() {
       .sort((a, b) => {
         const dateA = `${a.date} ${a.time}`;
         const dateB = `${b.date} ${b.time}`;
+
         return dateB.localeCompare(dateA);
       })
       .slice(0, 5);
@@ -403,7 +431,9 @@ function App() {
   // Keep it mounted afterward so its local state is preserved.
   function navigate(page) {
     setVisitedPages(prev =>
-      prev.includes(page) ? prev : [...prev, page]
+      prev.includes(page)
+        ? prev
+        : [...prev, page]
     );
 
     setActivePage(page);
@@ -443,7 +473,9 @@ function App() {
         <Signup
           onSignupSuccess={() => {
             setAuthPage('login');
-            setAuthNotice('Account created successfully. Please sign in.');
+            setAuthNotice(
+              'Account created successfully. Please sign in.'
+            );
           }}
           onSwitchToLogin={() => {
             setAuthPage('login');
@@ -476,14 +508,15 @@ function App() {
       navigation={navigation}
       activePage={activePage}
       navigate={navigate}
-      onLogout={handleLogout}
     >
 
       {/* HOME PAGE */}
       {visitedPages.includes('Home') && (
         <div
           className="home-page"
-          style={{ display: activePage === 'Home' ? 'block' : 'none' }}
+          style={{
+            display: activePage === 'Home' ? 'block' : 'none'
+          }}
         >
           {/* HERO */}
           <section className="hero-banner">
@@ -530,7 +563,9 @@ function App() {
             </div>
 
             <div className="hero-text">
-              <h2>Track. Understand. <span>Act.</span></h2>
+              <h2>
+                Track. Understand. <span>Act.</span>
+              </h2>
 
               <p>
                 Satellite data and geospatial intelligence
@@ -546,6 +581,7 @@ function App() {
 
               <div>
                 <strong>Dashboard connection issue</strong>
+
                 <p>
                   {error} Make sure your FastAPI backend is running on port 8000.
                 </p>
@@ -568,7 +604,7 @@ function App() {
               </div>
 
               <div>
-                <p>Total Fire Detections</p>
+                <p>Total Thermal Observations</p>
 
                 <h3>
                   {loading && !overview
@@ -576,7 +612,7 @@ function App() {
                     : (overview?.total_detections ?? '—').toLocaleString()}
                 </h3>
 
-                <small>From loaded FIRMS dataset</small>
+                <small>Live NASA FIRMS observations</small>
               </div>
             </button>
 
@@ -623,7 +659,7 @@ function App() {
           <div className="home-data-status">
             <span className="home-status-dot" />
 
-            <span>Source: NASA FIRMS CSV</span>
+            <span>Source: NASA FIRMS NOAA-21 NRT</span>
 
             <span className="home-status-divider">|</span>
 
@@ -651,7 +687,9 @@ function App() {
 
                 <div className="map-tabs">
                   <button
-                    className={mapLayer === 'Detections' ? 'active-tab' : ''}
+                    className={
+                      mapLayer === 'Detections' ? 'active-tab' : ''
+                    }
                     onClick={() => setMapLayer('Detections')}
                   >
                     <Flame size={15} />
@@ -659,7 +697,9 @@ function App() {
                   </button>
 
                   <button
-                    className={mapLayer === 'Risk Zones' ? 'active-tab' : ''}
+                    className={
+                      mapLayer === 'Risk Zones' ? 'active-tab' : ''
+                    }
                     onClick={() => setMapLayer('Risk Zones')}
                   >
                     <Layers size={15} />
@@ -693,7 +733,9 @@ function App() {
                         CONFIDENCE_COLORS.n;
 
                       const radius = Math.min(
-                        3 + Math.sqrt(Math.max(Number(detection.frp) || 0, 0)),
+                        3 + Math.sqrt(
+                          Math.max(Number(detection.frp) || 0, 0)
+                        ),
                         8
                       );
 
@@ -741,7 +783,9 @@ function App() {
                             Number(alert.longitude)
                           ]}
                           radius={Math.min(
-                            7 + Math.sqrt(Number(alert.detection_count) || 1) * 3,
+                            7 + Math.sqrt(
+                              Number(alert.detection_count) || 1
+                            ) * 3,
                             18
                           )}
                           pathOptions={{
@@ -876,7 +920,9 @@ function App() {
 
                     <div>
                       <strong>
-                        {loading ? 'Loading observations...' : 'No observations found'}
+                        {loading
+                          ? 'Loading observations...'
+                          : 'No observations found'}
                       </strong>
 
                       <p>
@@ -960,6 +1006,7 @@ function App() {
 
               <div className="bottom-note">
                 <Wind size={19} />
+
                 <span>
                   Turning satellite observations into useful insights.
                 </span>
@@ -978,7 +1025,11 @@ function App() {
 
       {/* EXPLORE MAP */}
       {visitedPages.includes('Explore Map') && (
-        <div style={{ display: activePage === 'Explore Map' ? 'block' : 'none' }}>
+        <div
+          style={{
+            display: activePage === 'Explore Map' ? 'block' : 'none'
+          }}
+        >
           <ExploreMap
             search={search}
             onSearchChange={setSearch}
@@ -992,29 +1043,48 @@ function App() {
 
       {/* RISK ANALYSIS */}
       {visitedPages.includes('Risk Analysis') && (
-        <div style={{ display: activePage === 'Risk Analysis' ? 'block' : 'none' }}>
+        <div
+          style={{
+            display: activePage === 'Risk Analysis' ? 'block' : 'none'
+          }}
+        >
           <RiskAnalysis />
         </div>
       )}
 
       {/* ALERTS */}
       {visitedPages.includes('Alerts') && (
-        <div style={{ display: activePage === 'Alerts' ? 'block' : 'none' }}>
+        <div
+          style={{
+            display: activePage === 'Alerts' ? 'block' : 'none'
+          }}
+        >
           <Alerts />
         </div>
       )}
 
       {/* DATA & METHODS */}
       {visitedPages.includes('Data & Methods') && (
-        <div style={{ display: activePage === 'Data & Methods' ? 'block' : 'none' }}>
+        <div
+          style={{
+            display: activePage === 'Data & Methods' ? 'block' : 'none'
+          }}
+        >
           <DataMethods />
         </div>
       )}
 
       {/* PROFILE */}
       {visitedPages.includes('Profile') && (
-        <div style={{ display: activePage === 'Profile' ? 'block' : 'none' }}>
-          <Profile onLogout={handleLogout} user={user} />
+        <div
+          style={{
+            display: activePage === 'Profile' ? 'block' : 'none'
+          }}
+        >
+          <Profile
+            onLogout={handleLogout}
+            user={user}
+          />
         </div>
       )}
 
