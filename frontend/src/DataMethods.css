@@ -1,4 +1,3 @@
-
 .analytics-page {
   color: #f4f5f7;
   padding-bottom: 30px;
@@ -595,4 +594,49 @@
   .analytics-footer {
     flex-direction: column;
   }
+}
+
+
+/* ---------- Refreshing state (date change / manual refresh) ---------- */
+
+.analytics-body {
+  position: relative;
+}
+
+/* Dim everything except the date picker and the banner while loading,
+   so stale numbers are never mistaken for the new date's numbers. */
+.analytics-body.is-refreshing >
+  *:not(.analytics-date-section):not(.analytics-refresh-banner) {
+  opacity: 0.4;
+  filter: saturate(0.6);
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.analytics-refresh-banner {
+  position: sticky;
+  top: 12px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto 14px;
+  padding: 10px 16px;
+  border: 1px solid #ff995555;
+  border-radius: 999px;
+  background: #142536f2;
+  color: #f2f6f9;
+  font-size: 12px;
+  box-shadow: 0 8px 24px #00000055;
+}
+
+.analytics-refresh-banner small {
+  color: #9fb1c1;
+  font-size: 11px;
+}
+
+@media (max-width: 600px) {
+  .analytics-refresh-banner small { display: none; }
 }

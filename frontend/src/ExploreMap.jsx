@@ -85,6 +85,52 @@ function MapFocusController({ selected, feature }) {
   return null;
 }
 
+// Bounding boxes are computed once per feature and cached. Without this,
+// every point-in-polygon call re-scans the whole boundary, which freezes
+// the page for seconds when thousands of detections are filtered.
+const featureBBoxes = new WeakMap();
+
+function getFeatureBBox(feature) {
+  const cached = featureBBoxes.get(feature);
+  if (cached) return cached;
+
+  let minLng = Infinity;
+  let minLat = Infinity;
+  let maxLng = -Infinity;
+  let maxLat = -Infinity;
+
+  const walk = (coords) => {
+    if (typeof coords[0] === 'number') {
+      if (coords[0] < minLng) minLng = coords[0];
+      if (coords[0] > maxLng) maxLng = coords[0];
+      if (coords[1] < minLat) minLat = coords[1];
+      if (coords[1] > maxLat) maxLat = coords[1];
+      return;
+    }
+
+    coords.forEach(walk);
+  };
+
+  walk(feature.geometry.coordinates);
+
+  const box = [minLng, minLat, maxLng, maxLat];
+  featureBBoxes.set(feature, box);
+
+  return box;
+}
+
+function utcDateOffset(daysAgo) {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - daysAgo);
+  return date.toISOString().slice(0, 10);
+}
+
+function shiftDateString(dateString, days) {
+  const date = new Date(`${dateString}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 function detectionInsideFeature(detection, feature) {
   if (!feature?.geometry) return false;
 
@@ -92,6 +138,15 @@ function detectionInsideFeature(detection, feature) {
   const longitude = Number(detection.longitude);
 
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return false;
+  }
+
+  const [minLng, minLat, maxLng, maxLat] = getFeatureBBox(feature);
+
+  if (
+    longitude < minLng || longitude > maxLng ||
+    latitude < minLat || latitude > maxLat
+  ) {
     return false;
   }
 
@@ -139,6 +194,7 @@ export default function ExploreMap({
   const [geoError, setGeoError] = useState('');
 
   const [refreshKey, setRefreshKey] = useState(0);
+  const [slowLoad, setSlowLoad] = useState(false);
 
   const search = sharedSearch ?? localSearch;
   const setSearch = onSearchChange ?? setLocalSearch;
@@ -237,6 +293,17 @@ export default function ExploreMap({
     };
 
   }, [refreshKey, date]);
+
+  // Render's free tier sleeps. If loading drags on, say why.
+  useEffect(() => {
+    if (!liveLoading) {
+      setSlowLoad(false);
+      return undefined;
+    }
+
+    const timer = setTimeout(() => setSlowLoad(true), 6000);
+    return () => clearTimeout(timer);
+  }, [liveLoading]);
 
   // Load district boundaries when a state is selected.
   useEffect(() => {
@@ -446,9 +513,29 @@ export default function ExploreMap({
     setSelected(null);
   }
 
+  // Clears filters but keeps the chosen date.
+  function clearFilters() {
+    setConfidence('All');
+    setIntensity('All');
+    setSearch('');
+    setSelectedState('');
+    setSelectedDistrict('');
+    setSelected(null);
+  }
+
   function refreshData() {
     setRefreshKey(value => value + 1);
   }
+
+  const hasActiveFilters =
+    confidence !== 'All' ||
+    intensity !== 'All' ||
+    search.trim() !== '' ||
+    Boolean(selectedState) ||
+    Boolean(selectedDistrict);
+
+  const noDataAtAll = liveDetections.length === 0;
+  const showPlaceholder = liveLoading && noDataAtAll;
 
   function selectDetection(detection) {
     setSelected(detection);
@@ -587,7 +674,7 @@ export default function ExploreMap({
 
           <div>
             <span>Visible observations</span>
-            <strong>{stats.total.toLocaleString()}</strong>
+            <strong>{showPlaceholder ? '—' : stats.total.toLocaleString()}</strong>
           </div>
         </div>
 
@@ -598,7 +685,7 @@ export default function ExploreMap({
 
           <div>
             <span>High confidence</span>
-            <strong>{stats.high.toLocaleString()}</strong>
+            <strong>{showPlaceholder ? '—' : stats.high.toLocaleString()}</strong>
           </div>
         </div>
 
@@ -610,7 +697,7 @@ export default function ExploreMap({
           <div>
             <span>Average FRP</span>
             <strong>
-              {stats.averageFrp}
+              {showPlaceholder ? '—' : stats.averageFrp}
               <small> MW</small>
             </strong>
           </div>
@@ -924,19 +1011,99 @@ export default function ExploreMap({
           )}
 
           {liveLoading && (
-            <div className="fx-map-loading">
-              <RefreshCw size={14} />
-              {date
-                ? "Loading historical observations..."
-                : "Loading live observations..."}
+            <div className="fx-map-skeleton" role="status" aria-live="polite">
+              <div className="fx-map-skeleton-shimmer" />
+
+              <div className="fx-map-skeleton-card">
+                <RefreshCw size={20} className="fx-spin" />
+
+                <strong>
+                  {date
+                    ? `Loading observations for ${date}`
+                    : 'Loading live observations'}
+                </strong>
+
+                <span>
+                  {slowLoad
+                    ? 'The server is waking up. The first load can take up to a minute.'
+                    : 'Fetching NASA FIRMS thermal detections…'}
+                </span>
+              </div>
             </div>
           )}
 
           {!liveLoading && !liveError && visible.length === 0 && (
-            <div className="fx-map-empty">
-              {date
-                ? `No observations found for ${date} with the selected filters.`
-                : "No observations match the selected filters."}
+            <div className="fx-map-empty-card" role="status">
+              <div className="fx-map-empty-icon">
+                <Flame size={22} />
+              </div>
+
+              {!noDataAtAll && hasActiveFilters ? (
+                <>
+                  <h3>No detections match your filters</h3>
+                  <p>
+                    There are {liveDetections.length.toLocaleString()} observations
+                    loaded, but none fit the current confidence, intensity,
+                    search or region settings.
+                  </p>
+
+                  <div className="fx-map-empty-actions">
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={clearFilters}
+                    >
+                      Clear filters
+                    </button>
+                  </div>
+                </>
+              ) : date ? (
+                <>
+                  <h3>No observations for {date}</h3>
+                  <p>
+                    NASA may not have published the archive for this date
+                    yet, or no thermal detections were recorded over India.
+                    Try the previous day or go back to live data.
+                  </p>
+
+                  <div className="fx-map-empty-actions">
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => setDate(shiftDateString(date, -1))}
+                    >
+                      Try previous day
+                    </button>
+
+                    <button type="button" onClick={() => setDate('')}>
+                      Back to live data
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h3>No detections right now</h3>
+                  <p>
+                    No thermal detections have been recorded yet today (UTC).
+                    Satellites pass over India only a few times a day, so
+                    quiet periods are normal. Try a recent date instead.
+                  </p>
+
+                  <div className="fx-map-empty-actions">
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => setDate(utcDateOffset(1))}
+                    >
+                      View yesterday
+                    </button>
+
+                    <button type="button" onClick={refreshData}>
+                      Refresh
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           )}
 

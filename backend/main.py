@@ -1,5 +1,6 @@
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from threading import Lock
 from time import monotonic
 from functools import wraps
@@ -550,207 +551,215 @@ def get_alerts(
     )
 ):
 
-    data = prepare_live_dataframe(date=date or None)
+    india_today = datetime.now(
+            ZoneInfo("Asia/Kolkata")
+        ).date()
 
-    historical = bool(date)
+    is_today = (
+            bool(date)
+            and date == india_today.strftime("%Y-%m-%d")
+        )
+
+    historical = bool(date) and not is_today
+
+    data = prepare_live_dataframe(
+            date=date if historical else None
+        )
 
     source = (
-        f"NASA FIRMS - {get_historical_snapshot(date)[1]}"
-        if historical else SOURCE
-    )
+            f"NASA FIRMS - {get_historical_snapshot(date)[1]}"
+            if historical else SOURCE
+        )
 
     mode = "HISTORICAL" if historical else "LIVE"
-
     if len(data) < 2:
-
         return {
-            "total_alerts": 0,
-            "matched_alerts": 0,
-            "returned": 0,
-            "severity_counts": {
-                "critical": 0,
-                "warning": 0,
-                "informational": 0
-            },
-            "alerts": [],
-            "source": source,
-            "mode": mode,
-            "cluster_distance_km": CLUSTER_DISTANCE_KM
-        }
+                "total_alerts": 0,
+                "matched_alerts": 0,
+                "returned": 0,
+                "severity_counts": {
+                    "critical": 0,
+                    "warning": 0,
+                    "informational": 0
+                },
+                "alerts": [],
+                "source": source,
+                "mode": mode,
+                "cluster_distance_km": CLUSTER_DISTANCE_KM
+            }
 
     coordinates = np.radians(
-        data[["latitude", "longitude"]].to_numpy()
-    )
+            data[["latitude", "longitude"]].to_numpy()
+        )
 
     clusterer = DBSCAN(
-        eps=CLUSTER_DISTANCE_KM / EARTH_RADIUS_KM,
-        min_samples=2,
-        metric="haversine",
-        algorithm="ball_tree"
-    )
+            eps=CLUSTER_DISTANCE_KM / EARTH_RADIUS_KM,
+            min_samples=2,
+            metric="haversine",
+            algorithm="ball_tree"
+        )
 
     data["_cluster"] = clusterer.fit_predict(coordinates)
 
     generated_alerts = []
 
     clustered_data = data[
-        data["_cluster"] != -1
-    ]
+            data["_cluster"] != -1
+        ]
 
     for cluster_id, group in clustered_data.groupby("_cluster"):
 
-        count = len(group)
+            count = len(group)
 
-        max_frp = float(group["frp"].max())
+            max_frp = float(group["frp"].max())
 
-        average_frp = float(group["frp"].mean())
+            average_frp = float(group["frp"].mean())
 
-        counts = confidence_counts(group)
+            counts = confidence_counts(group)
 
-        high_count = counts["high"]
+            high_count = counts["high"]
 
-        if max_frp >= 50 or (count >= 5 and max_frp >= 20):
-            level = "Critical"
+            if max_frp >= 50 or (count >= 5 and max_frp >= 20):
+                level = "Critical"
 
-        elif count >= 3 or max_frp >= 10 or high_count >= 2:
-            level = "Warning"
+            elif count >= 3 or max_frp >= 10 or high_count >= 2:
+                level = "Warning"
 
-        else:
-            level = "Informational"
+            else:
+                level = "Informational"
 
-        latest = group["_datetime"].max()
+            latest = group["_datetime"].max()
 
-        satellites = (
-            sorted(
-                group["satellite"]
-                .dropna()
-                .astype(str)
-                .unique()
-                .tolist()
+            satellites = (
+                sorted(
+                    group["satellite"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                )
+                if "satellite" in group.columns
+                else []
             )
-            if "satellite" in group.columns
-            else []
-        )
 
-        generated_alerts.append({
-            "id": f"cluster-{int(cluster_id)}",
-            "title": "Geographic hotspot cluster",
-            "severity": level,
-            "latitude": round(
-                float(group["latitude"].mean()), 5
-            ),
-            "longitude": round(
-                float(group["longitude"].mean()), 5
-            ),
-            "detection_count": int(count),
-            "maximum_frp": round(max_frp, 2),
-            "average_frp": round(average_frp, 2),
-            "high_confidence_count": high_count,
-            "confidence_distribution": counts,
-            "latest_detection": (
-                latest.strftime("%Y-%m-%d %H:%M UTC")
-                if pd.notna(latest)
-                else "Unknown"
-            ),
-            "_sort_time": (
-                latest.timestamp()
-                if pd.notna(latest) else 0
-            ),
-            "satellites": satellites
-        })
+            generated_alerts.append({
+                "id": f"cluster-{int(cluster_id)}",
+                "title": "Geographic hotspot cluster",
+                "severity": level,
+                "latitude": round(
+                    float(group["latitude"].mean()), 5
+                ),
+                "longitude": round(
+                    float(group["longitude"].mean()), 5
+                ),
+                "detection_count": int(count),
+                "maximum_frp": round(max_frp, 2),
+                "average_frp": round(average_frp, 2),
+                "high_confidence_count": high_count,
+                "confidence_distribution": counts,
+                "latest_detection": (
+                    latest.strftime("%Y-%m-%d %H:%M UTC")
+                    if pd.notna(latest)
+                    else "Unknown"
+                ),
+                "_sort_time": (
+                    latest.timestamp()
+                    if pd.notna(latest) else 0
+                ),
+                "satellites": satellites
+            })
 
     isolated = data[
-        (data["_cluster"] == -1)
-        & (data["frp"] >= 20)
-        & (data["confidence"] == "h")
-    ]
+            (data["_cluster"] == -1)
+            & (data["frp"] >= 20)
+            & (data["confidence"] == "h")
+        ]
 
     for index, row in isolated.iterrows():
 
-        detection_time = row["_datetime"]
+            detection_time = row["_datetime"]
 
-        satellite = safe_string(
-            row.get("satellite")
-        )
+            satellite = safe_string(
+                row.get("satellite")
+            )
 
-        generated_alerts.append({
-            "id": f"detection-{index}",
-            "title": "High-intensity isolated detection",
-            "severity": "Warning",
-            "latitude": round(
-                float(row["latitude"]), 5
-            ),
-            "longitude": round(
-                float(row["longitude"]), 5
-            ),
-            "detection_count": 1,
-            "maximum_frp": round(
-                float(row["frp"]), 2
-            ),
-            "average_frp": round(
-                float(row["frp"]), 2
-            ),
-            "high_confidence_count": 1,
-            "confidence_distribution": {
-                "high": 1,
-                "nominal": 0,
-                "low": 0
-            },
-            "latest_detection": (
-                detection_time.strftime("%Y-%m-%d %H:%M UTC")
-                if pd.notna(detection_time)
-                else "Unknown"
-            ),
-            "_sort_time": (
-                detection_time.timestamp()
-                if pd.notna(detection_time)
-                else 0
-            ),
-            "satellites": [satellite]
-        })
-
+            generated_alerts.append({
+                "id": f"detection-{index}",
+                "title": "High-intensity isolated detection",
+                "severity": "Warning",
+                "latitude": round(
+                    float(row["latitude"]), 5
+                ),
+                "longitude": round(
+                    float(row["longitude"]), 5
+                ),
+                "detection_count": 1,
+                "maximum_frp": round(
+                    float(row["frp"]), 2
+                ),
+                "average_frp": round(
+                    float(row["frp"]), 2
+                ),
+                "high_confidence_count": 1,
+                "confidence_distribution": {
+                    "high": 1,
+                    "nominal": 0,
+                    "low": 0
+                },
+                "latest_detection": (
+                    detection_time.strftime("%Y-%m-%d %H:%M UTC")
+                    if pd.notna(detection_time)
+                    else "Unknown"
+                ),
+                "_sort_time": (
+                    detection_time.timestamp()
+                    if pd.notna(detection_time)
+                    else 0
+                ),
+                "satellites": [satellite]
+            })
     generated_alerts.sort(
-        key=lambda alert: (
-            SEVERITY_ORDER[alert["severity"]],
-            -alert["_sort_time"]
+            key=lambda alert: (
+                SEVERITY_ORDER[alert["severity"]],
+                -alert["_sort_time"]
+            )
         )
-    )
 
     total_alerts = len(generated_alerts)
 
     severity_counts = {
-        "critical": sum(
-            alert["severity"] == "Critical"
-            for alert in generated_alerts
-        ),
-        "warning": sum(
-            alert["severity"] == "Warning"
-            for alert in generated_alerts
-        ),
-        "informational": sum(
-            alert["severity"] == "Informational"
-            for alert in generated_alerts
-        )
-    }
+            "critical": sum(
+                alert["severity"] == "Critical"
+                for alert in generated_alerts
+            ),
+            "warning": sum(
+                alert["severity"] == "Warning"
+                for alert in generated_alerts
+            ),
+            "informational": sum(
+                alert["severity"] == "Informational"
+                for alert in generated_alerts
+            )
+        }
 
     valid_severities = [
-        "All",
-        "Critical",
-        "Warning",
-        "Informational"
-    ]
+            "All",
+            "Critical",
+            "Warning",
+            "Informational"
+        ]
 
     if severity not in valid_severities:
-        severity = "All"
+            severity = "All"
 
     filtered = generated_alerts
 
     if severity != "All":
 
-        filtered = [
-            alert for alert in filtered
-            if alert["severity"] == severity
-        ]
+            filtered = [
+                alert for alert in filtered
+                if alert["severity"] == severity
+            ]
 
     query = search.strip().lower()
 
@@ -758,29 +767,29 @@ def get_alerts(
 
         def matches(alert):
 
-            values = [
-                alert["id"],
-                alert["title"],
-                alert["severity"],
-                alert["latitude"],
-                alert["longitude"],
-                alert["maximum_frp"],
-                alert["average_frp"],
-                alert["detection_count"],
-                alert["latest_detection"],
-                " ".join(alert["satellites"]),
-                alert["high_confidence_count"]
-            ]
+                values = [
+                    alert["id"],
+                    alert["title"],
+                    alert["severity"],
+                    alert["latitude"],
+                    alert["longitude"],
+                    alert["maximum_frp"],
+                    alert["average_frp"],
+                    alert["detection_count"],
+                    alert["latest_detection"],
+                    " ".join(alert["satellites"]),
+                    alert["high_confidence_count"]
+                ]
 
-            return any(
-                query in str(value).lower()
-                for value in values
-            )
+                return any(
+                    query in str(value).lower()
+                    for value in values
+                )
 
         filtered = [
-            alert for alert in filtered
-            if matches(alert)
-        ]
+                alert for alert in filtered
+                if matches(alert)
+            ]
 
     visible_alerts = []
 
@@ -894,13 +903,21 @@ def get_analytics_charts(
         description="Optional historical date YYYY-MM-DD"
     )
 ):
+    india_today = datetime.now(
+        ZoneInfo("Asia/Kolkata")
+    ).date()
 
-    # Selected date controls the KPI and distribution calculations.
-    data = prepare_live_dataframe(
-        date=date or None
+    # Today's observations should come from the live feed.
+    is_today = (
+        bool(date)
+        and date == india_today.strftime("%Y-%m-%d")
     )
 
-    historical = bool(date)
+    historical = bool(date) and not is_today
+
+    data = prepare_live_dataframe(
+        date=date if historical else None
+    )
 
     source = (
         f"NASA FIRMS - {get_historical_snapshot(date)[1]}"
@@ -908,7 +925,6 @@ def get_analytics_charts(
     )
 
     mode = "HISTORICAL" if historical else "LIVE"
-
     # --------------------------------------------------
     # CONFIDENCE DISTRIBUTION
     # --------------------------------------------------

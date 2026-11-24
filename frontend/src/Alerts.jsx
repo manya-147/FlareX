@@ -12,12 +12,23 @@ import {
   Satellite,
   ChevronDown,
   ExternalLink,
+  CalendarDays,
+  X,
 } from 'lucide-react';
-import './Alerts.css';
 
+import './Alerts.css';
 import { API_BASE_URL } from './api';
 
 const API_URL = `${API_BASE_URL}/api/alerts`;
+
+function getLocalDate() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+
+  return `${year}-${month}-${day}`;
+}
 
 function Alerts({ selectedDate = '' }) {
   const [data, setData] = useState(null);
@@ -28,9 +39,17 @@ function Alerts({ selectedDate = '' }) {
   const [refreshKey, setRefreshKey] = useState(0);
   const [expandedAlert, setExpandedAlert] = useState(null);
 
-  const isHistorical = Boolean(selectedDate);
+  // Local date selection, while still supporting a date from the parent.
+  const [alertDate, setAlertDate] = useState(selectedDate || '');
 
-  // Fetch alerts whenever filters, search or selected date change.
+  useEffect(() => {
+    setAlertDate(selectedDate || '');
+  }, [selectedDate]);
+
+  const isHistorical = data?.mode === 'HISTORICAL';
+  const today = getLocalDate();
+
+  // Fetch alerts whenever filters, search or date change.
   useEffect(() => {
     const controller = new AbortController();
 
@@ -45,8 +64,8 @@ function Alerts({ selectedDate = '' }) {
           search: search.trim(),
         });
 
-        if (selectedDate) {
-          params.set('date', selectedDate);
+        if (alertDate) {
+          params.set('date', alertDate);
         }
 
         const response = await fetch(
@@ -88,14 +107,13 @@ function Alerts({ selectedDate = '' }) {
       }
     };
 
-    // Small delay prevents unnecessary requests while typing.
     const timer = setTimeout(loadAlerts, 300);
 
     return () => {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [filter, search, refreshKey, selectedDate]);
+  }, [filter, search, refreshKey, alertDate]);
 
   const alerts = data?.alerts ?? [];
 
@@ -110,6 +128,11 @@ function Alerts({ selectedDate = '' }) {
 
   const refreshAlerts = () => {
     setRefreshKey((previous) => previous + 1);
+  };
+
+  const clearDate = () => {
+    setAlertDate('');
+    setExpandedAlert(null);
   };
 
   const severityClass = (severity) =>
@@ -147,6 +170,43 @@ function Alerts({ selectedDate = '' }) {
         </button>
       </header>
 
+      {/* DATE SELECTOR */}
+      <section className="alerts-date-selector">
+        <div className="alerts-date-label">
+          <CalendarDays size={19} />
+
+          <div>
+            <strong>View alerts by date</strong>
+            <p>Select a date to inspect its satellite observations.</p>
+          </div>
+        </div>
+
+        <div className="alerts-date-controls">
+          <input
+            type="date"
+            value={alertDate}
+            max={today}
+            onChange={(event) => {
+              setAlertDate(event.target.value);
+              setExpandedAlert(null);
+            }}
+            aria-label="Select alert date"
+          />
+
+          {alertDate && (
+            <button
+              type="button"
+              className="alerts-clear-date"
+              onClick={clearDate}
+              title="Clear date and return to live alerts"
+            >
+              <X size={15} />
+              Live alerts
+            </button>
+          )}
+        </div>
+      </section>
+
       {/* DATA SOURCE STATUS */}
       <div className="alerts-status-banner">
         <div className="alerts-status-icon">
@@ -162,8 +222,8 @@ function Alerts({ selectedDate = '' }) {
 
           <p>{data?.source || 'NASA FIRMS NOAA-21'}</p>
 
-          {isHistorical && (
-            <p>Selected date: {selectedDate}</p>
+          {alertDate && (
+            <p>Selected date: {alertDate}</p>
           )}
         </div>
 
@@ -314,7 +374,7 @@ function Alerts({ selectedDate = '' }) {
               <Search size={25} />
               <h3>No matching alerts</h3>
               <p>
-                Try changing the severity filter or search term.
+                Try changing the severity filter, search term or date.
               </p>
             </div>
           ) : (

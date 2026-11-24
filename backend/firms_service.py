@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from io import StringIO
 from datetime import datetime, date
-
+from zoneinfo import ZoneInfo
 import requests
 import pandas as pd
 from dotenv import load_dotenv
@@ -142,9 +142,10 @@ def fetch_observations_for_date(selected_date):
             "Date must be in YYYY-MM-DD format."
         ) from error
 
-    if requested_date > date.today():
-        raise ValueError("Future dates cannot be requested.")
+    india_today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
 
+    if requested_date > india_today:
+        raise ValueError("Future dates cannot be requested.")
     availability = get_noaa21_data_availability()
 
     # Normalize column names returned by NASA

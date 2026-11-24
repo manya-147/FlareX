@@ -1,4 +1,3 @@
-
 /* =========================================
    FLAREX EXPLORE MAP
    Spacious / Dark / Permanent layout
@@ -1438,4 +1437,128 @@
 .flare-explore .fx-live-dot {
   background: #55cbb5;
   box-shadow: 0 0 9px #55cbb577;
+}
+
+
+/* ---------- Map loading skeleton ---------- */
+
+.fx-map-skeleton {
+  position: absolute;
+  inset: 0;
+  z-index: 650;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.fx-map-skeleton-shimmer {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(
+      100deg,
+      #101e2c 20%,
+      #1b2f42 40%,
+      #101e2c 60%
+    );
+  background-size: 200% 100%;
+  opacity: 0.82;
+  animation: fx-shimmer 1.6s ease-in-out infinite;
+}
+
+.fx-map-skeleton-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: min(360px, calc(100% - 32px));
+  padding: 20px 24px;
+  border: 1px solid #42596e;
+  border-radius: 12px;
+  background: #142536f2;
+  color: #dce6ee;
+  text-align: center;
+  box-shadow: 0 12px 32px #00000066;
+}
+
+.fx-map-skeleton-card svg { color: var(--fx-orange, #ff9955); }
+.fx-map-skeleton-card strong { font-size: 13px; }
+.fx-map-skeleton-card span { color: #9fb1c1; font-size: 11px; line-height: 1.5; }
+
+.fx-spin { animation: fx-spin 1s linear infinite; }
+
+@keyframes fx-spin { to { transform: rotate(360deg); } }
+
+@keyframes fx-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ---------- Friendly empty state ---------- */
+
+.fx-map-empty-card {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 600;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: min(380px, calc(100% - 32px));
+  padding: 22px 24px;
+  transform: translate(-50%, -50%);
+  border: 1px solid #42596e;
+  border-radius: 14px;
+  background: #142536f5;
+  color: #dce6ee;
+  text-align: center;
+  box-shadow: 0 14px 36px #00000070;
+}
+
+.fx-map-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #ff995520;
+  color: var(--fx-orange, #ff9955);
+}
+
+.fx-map-empty-card h3 { margin: 4px 0 0; font-size: 15px; }
+.fx-map-empty-card p  { margin: 0; color: #9fb1c1; font-size: 11.5px; line-height: 1.55; }
+
+.fx-map-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.fx-map-empty-actions button {
+  padding: 9px 14px;
+  border: 1px solid #42596e;
+  border-radius: 8px;
+  background: transparent;
+  color: #dce6ee;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.fx-map-empty-actions button:hover { background: #ffffff10; }
+
+.fx-map-empty-actions button.primary {
+  border-color: transparent;
+  background: var(--fx-orange, #ff9955);
+  color: #152536;
+  font-weight: 600;
+}
+
+.fx-map-empty-actions button.primary:hover { filter: brightness(1.08); }
+
+@media (prefers-reduced-motion: reduce) {
+  .fx-map-skeleton-shimmer, .fx-spin { animation: none; }
 }

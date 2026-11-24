@@ -1,5 +1,4 @@
-
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 
 import {
   ResponsiveContainer,
@@ -39,12 +38,7 @@ const API_URL = `${API_BASE_URL}/api/analytics/charts`;
 const COLORS = ['#ff795f', '#62d9bd', '#f4bd65'];
 
 function getLocalDate() {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-
-  return `${year}-${month}-${day}`;
+  return new Date().toISOString().split('T')[0];
 }
 
 function formatDateLabel(value) {
@@ -97,7 +91,16 @@ function DataMethods() {
   const [error, setError] = useState('');
   const [selectedDate, setSelectedDate] = useState(getLocalDate());
 
+  // Holds the request currently in flight so an older, slower response
+  // can never overwrite the data for the date the user picked last.
+  const requestRef = useRef(null);
+
   const fetchAnalytics = useCallback(async (date = selectedDate) => {
+    requestRef.current?.abort();
+
+    const controller = new AbortController();
+    requestRef.current = controller;
+
     setLoading(true);
     setError('');
 
@@ -108,16 +111,24 @@ function DataMethods() {
         params.set('date', date);
       }
 
-      const response = await fetch(`${API_URL}?${params.toString()}`);
+      const response = await fetch(
+        `${API_URL}?${params.toString()}`,
+        { signal: controller.signal }
+      );
 
       if (!response.ok) {
         throw new Error(`API returned ${response.status}`);
       }
 
       const result = await response.json();
+
+      if (controller.signal.aborted) return;
+
       setData(result);
 
     } catch (err) {
+      if (err.name === 'AbortError') return;
+
       console.error('Analytics API error:', err);
 
       setError(
@@ -125,13 +136,19 @@ function DataMethods() {
       );
 
     } finally {
-      setLoading(false);
+      // Only the newest request is allowed to clear the loading state.
+      if (requestRef.current === controller) {
+        setLoading(false);
+      }
     }
   }, [selectedDate]);
 
   useEffect(() => {
     fetchAnalytics(selectedDate);
   }, [fetchAnalytics, selectedDate]);
+
+  // Cancel any pending request when leaving the page.
+  useEffect(() => () => requestRef.current?.abort(), []);
 
   const confidence = data?.confidence_distribution ?? [];
   const frp = data?.frp_distribution ?? [];
@@ -233,7 +250,18 @@ function DataMethods() {
           </button>
         </div>
       ) : (
-        <>
+        <div
+          className={`analytics-body${loading ? ' is-refreshing' : ''}`}
+          aria-busy={loading}
+        >
+
+          {loading && data && (
+            <div className="analytics-refresh-banner" role="status">
+              <RefreshCw size={14} className="analytics-spin" />
+              Updating analytics for {selectedDate}…
+              <small>The weekly comparison can take a few seconds.</small>
+            </div>
+          )}
 
           {/* DATA SOURCE */}
           <div className="analytics-source-strip">
@@ -732,7 +760,7 @@ function DataMethods() {
             </span>
           </footer>
 
-        </>
+        </div>
       )}
 
     </main>
